@@ -88,9 +88,94 @@ pub fn install(key: &Option<PathBuf>) -> Result<()> {
         println!("  hint: run `dotvault init <namespace>` to bind one");
     }
 
+    println!("\n[skill]");
+    install_skill(&global_dir)?;
+
     println!("\nDone. Next: `dotvault init <namespace>` then `dotvault set NAME VALUE`.");
     let _ = key;
     Ok(())
+}
+
+/// Install the dotvault ZCode skill: write SKILL.md to ~/.dotvault/skill/ and
+/// symlink it into ~/.agents/skills/dotvault so the agent discovers it.
+/// Idempotent: never overwrites an existing SKILL.md, refreshes the symlink.
+fn install_skill(global_dir: &Path) -> Result<()> {
+    let skill_dir = global_dir.join("skill");
+    let skill_file = skill_dir.join("SKILL.md");
+    let embedded = include_str!("../skill/SKILL.md");
+
+    // Write the skill file only if missing (never overwrite a user's edits).
+    std::fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("failed to create {}", skill_dir.display()))?;
+    if skill_file.exists() {
+        println!("  exists, left untouched: {}", skill_file.display());
+    } else {
+        std::fs::write(&skill_file, embedded.as_bytes())
+            .with_context(|| format!("failed to write {}", skill_file.display()))?;
+        println!("  wrote: {}", skill_file.display());
+    }
+
+    // Symlink ~/.agents/skills/dotvault -> ~/.dotvault/skill so the agent
+    // discovers it. Best-effort: missing ~/.agents/skills is not fatal.
+    if let Some(agents_dir) = agents_skills_dir() {
+        let link = agents_dir.join("dotvault");
+        std::fs::create_dir_all(&agents_dir).ok();
+        // Refresh the symlink: remove existing link/dir-target first.
+        if link.exists() || symlink_exists(&link) {
+            if let Ok(meta) = std::fs::symlink_metadata(&link) {
+                if meta.file_type().is_symlink() {
+                    let _ = std::fs::remove_file(&link);
+                }
+            }
+        }
+        if !link.exists() && !symlink_exists(&link) {
+            match symlink(&skill_dir, &link) {
+                Ok(()) => println!("  linked: {} -> {}", link.display(), skill_dir.display()),
+                Err(e) => println!(
+                    "  warning: could not link {} (skill is at {}): {e}",
+                    link.display(),
+                    skill_dir.display()
+                ),
+            }
+        } else {
+            println!("  link exists: {}", link.display());
+        }
+    } else {
+        println!(
+            "  (could not locate ~/.agents/skills; skill written to {} only)",
+            skill_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Resolve `~/.agents/skills` (HOME/USERPROFILE based).
+fn agents_skills_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".agents").join("skills"))
+}
+
+/// Whether a path is a symlink (cross-platform).
+fn symlink_exists(p: &Path) -> bool {
+    std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Create a symlink dir→target. On Unix this is std; on Windows it needs a
+/// crate, so we gate it (the skill is a convenience, not core to the binary).
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    // Windows symlink creation needs elevated rights or a dev-mode setting +
+    // a symlink crate. Skip gracefully; the user can link manually.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink not created on Windows automatically",
+    ))
 }
 
 pub fn ns_list() -> Result<()> {

@@ -302,6 +302,75 @@ env_test!(install_does_not_overwrite_config, {
     assert!(!after.contains("backup_keep = 50"));
 });
 
+// ---------- skill install ----------
+
+env_test!(install_writes_skill_and_symlinks, {
+    // Control HOME so the ~/.agents/skills symlink target is isolated too.
+    let home = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+    let iso = Iso::new();
+
+    commands::install(&key_opt(&iso)).unwrap();
+
+    // SKILL.md written under ~/.dotvault/skill/.
+    let dv_home = std::env::var("DOTVAULT_HOME").unwrap();
+    let skill_file = std::path::Path::new(&dv_home)
+        .join("skill")
+        .join("SKILL.md");
+    assert!(skill_file.exists(), "skill file should be written");
+    let body = std::fs::read_to_string(&skill_file).unwrap();
+    assert!(body.contains("name: dotvault"), "skill has wrong name");
+
+    // Symlink created under ~/.agents/skills/dotvault pointing at it.
+    let link = home.path().join(".agents").join("skills").join("dotvault");
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "skill symlink should exist"
+    );
+    // Reading through the link yields the skill content.
+    let via_link = std::fs::read_to_string(link.join("SKILL.md")).unwrap();
+    assert!(via_link.contains("name: dotvault"));
+
+    std::env::remove_var("DOTVAULT_HOME");
+    match old_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+});
+
+env_test!(install_skill_does_not_overwrite_existing, {
+    let home = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+    let iso = Iso::new();
+    let dv_home = std::env::var("DOTVAULT_HOME").unwrap();
+    let skill_file = std::path::Path::new(&dv_home)
+        .join("skill")
+        .join("SKILL.md");
+    std::fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
+    std::fs::write(&skill_file, "# my custom skill edits\nname: dotvault\n").unwrap();
+
+    commands::install(&key_opt(&iso)).unwrap();
+
+    // User's custom content preserved, not overwritten by the embedded version.
+    let after = std::fs::read_to_string(&skill_file).unwrap();
+    assert!(
+        after.contains("my custom skill edits"),
+        "skill was overwritten"
+    );
+    assert!(
+        !after.contains("用 dotvault 管理项目"),
+        "embedded skill overwrote custom"
+    );
+
+    std::env::remove_var("DOTVAULT_HOME");
+    match old_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+});
+
 // Keep `sandbox` referenced (used by install tests indirectly via Iso);
 // suppress dead-code warning if it's otherwise unused here.
 #[allow(dead_code)]
