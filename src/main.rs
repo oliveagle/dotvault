@@ -76,6 +76,8 @@ enum Command {
     },
     /// Verify the current namespace's vault integrity + access key.
     Doctor,
+    /// Print version + build details (git hash, build time, rustc, target).
+    Version,
 }
 
 #[derive(Subcommand, Debug)]
@@ -116,6 +118,7 @@ fn main() -> Result<()> {
             set_backup_keep,
         } => commands::config(&set_key, &set_backup_dir, &set_backup_keep),
         Command::Doctor => commands::doctor(&cli.key),
+        Command::Version => commands::version(),
     }
 }
 

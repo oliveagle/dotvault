@@ -201,6 +201,36 @@ pub fn doctor(key: &Option<PathBuf>) -> Result<()> {
     doctor_to(key, &mut lock)
 }
 
+/// `dotvault version` — print build details (version, git hash, build time,
+/// rustc, target). The values are injected at compile time by build.rs.
+pub fn version() -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    version_to(&mut lock)
+}
+
+pub fn version_to<W: Write>(out: &mut W) -> Result<()> {
+    // env! reads values injected by build.rs; the fallback literal is used
+    // when git wasn't available at build time.
+    let ver = env!("CARGO_PKG_VERSION");
+    let hash = option_env!("DOTVAULT_GIT_HASH").unwrap_or("unknown");
+    let dirty = option_env!("DOTVAULT_GIT_DIRTY").unwrap_or("false") == "true";
+    let built = option_env!("DOTVAULT_BUILD_TIME").unwrap_or("unknown");
+    let rustc = option_env!("DOTVAULT_RUSTC").unwrap_or("unknown");
+    let target = option_env!("DOTVAULT_TARGET").unwrap_or("unknown");
+    let hash_disp = if dirty {
+        format!("{hash} (dirty)")
+    } else {
+        hash.to_string()
+    };
+    writeln!(out, "dotvault {ver}")?;
+    writeln!(out, "commit: {hash_disp}")?;
+    writeln!(out, "built:  {built}")?;
+    writeln!(out, "rustc:  {rustc}")?;
+    writeln!(out, "target: {target}")?;
+    Ok(())
+}
+
 pub fn doctor_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     let kp = key_path(key.as_deref())?;
     let key_file = AccessKey::project_path()?;

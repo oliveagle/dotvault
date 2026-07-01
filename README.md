@@ -99,6 +99,7 @@ dotvault export                        # all KEY=VALUE lines to stdout
 dotvault ns list                       # list all namespaces
 dotvault ns remove <NAMESPACE>         # delete a namespace (needs SSH key)
 dotvault rekey --new-key <PATH>        # re-encrypt ALL namespaces with a new SSH key
+dotvault version                       # print version + git hash + build details
 dotvault doctor                        # verify current namespace integrity
 dotvault config [--set-key ...]        # show/set ~/.dotvault/config.toml
 ```
@@ -195,10 +196,22 @@ one (atomic temp + rename).
 ```sh
 cargo test                            # unit + integration tests
 ./scripts/quality-gate.sh --all       # fmt + clippy + tests + coverage >80%
+dotvault version                      # show version + git hash + build details
 ```
 
-Quality gate runs on every push and PR (`.github/workflows/ci.yml`); releases
-build on `v*` tags (`.github/workflows/release.yml`).
+Quality gate runs on every push and PR (`.github/workflows/ci.yml`) on macOS,
+Linux, and Windows; releases build on `v*` tags
+(`.github/workflows/release.yml`).
+
+### Releasing a new version
+
+```sh
+./scripts/bump.sh patch    # 0.2.0 → 0.2.1 (also: minor, major)
+```
+
+This bumps `Cargo.toml`/`Cargo.lock`, runs `cargo check`, commits
+`release vX.Y.Z`, tags `vX.Y.Z`, and pushes — which triggers the release
+workflow to build and publish platform binaries.
 
 ## License
 
