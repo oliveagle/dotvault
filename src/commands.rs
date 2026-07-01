@@ -294,6 +294,14 @@ pub fn version_to<W: Write>(out: &mut W) -> Result<()> {
     writeln!(out, "built:  {built}")?;
     writeln!(out, "rustc:  {rustc}")?;
     writeln!(out, "target: {target}")?;
+
+    // Online update check (best-effort, cached 1h, never blocks/fails).
+    // Goes to stderr so stdout stays parseable.
+    if let Some(latest) = crate::update::cached_latest_release_tag() {
+        if crate::update::is_newer(&latest, ver) {
+            eprintln!("update: {latest} available (run: scripts/upgrade.sh or curl ... | bash)");
+        }
+    }
     Ok(())
 }
 

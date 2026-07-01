@@ -213,6 +213,17 @@ This bumps `Cargo.toml`/`Cargo.lock`, runs `cargo check`, commits
 `release vX.Y.Z`, tags `vX.Y.Z`, and pushes — which triggers the release
 workflow to build and publish platform binaries.
 
+### Upgrading an install
+
+```sh
+scripts/upgrade.sh          # idempotent: no-op if already latest
+# or re-run the installer:
+curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/scripts/install.sh | bash
+```
+
+`dotvault version` also checks online (cached 1h) and prints an `update: vX.Y.Z
+available` line to stderr when a newer release exists.
+
 ## License
 
 MIT
