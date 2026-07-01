@@ -52,7 +52,10 @@ pub fn rotate_backups(dir: &Path, keep: usize) -> Result<()> {
             Some((p, mtime.unwrap_or(std::time::UNIX_EPOCH)))
         })
         .collect();
-    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    // Newest first: sort ascending by mtime, then reverse. (Avoids the
+    // clippy::unnecessary_sort_by lint on a reversed comparator.)
+    entries.sort_unstable_by_key(|(_, mtime)| *mtime);
+    entries.reverse();
 
     for (stale, _) in entries.into_iter().skip(keep) {
         if let Err(e) = std::fs::remove_file(&stale) {

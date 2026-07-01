@@ -1,0 +1,6 @@
+# Pin the toolchain so CI, releases, and local dev all use the same Rust.
+# CI uses `stable`; this file ensures `dtolnay/rust-toolchain@stable` and
+# `cargo` invocations stay consistent.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
