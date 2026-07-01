@@ -1,0 +1,27 @@
+[package]
+name = "dotvault"
+version = "0.1.0"
+edition = "2021"
+description = "SSH-key encrypted secret vault with .env export"
+license = "MIT"
+
+[lib]
+name = "dotvault"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+ssh-key = { version = "0.6", features = ["encryption", "ed25519", "rsa"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+rpassword = "7"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+ssh-key = { version = "0.6", features = ["encryption", "ed25519"] }

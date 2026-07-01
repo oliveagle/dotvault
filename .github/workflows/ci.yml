@@ -1,0 +1,65 @@
+name: CI
+
+# Quality gate + tests on macOS, Linux, and Windows. The namespaced file-lock
+# and path handling must behave identically across platforms.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # All three target platforms for cross-platform correctness.
+        os: [ubuntu-22.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Configure Git line-endings (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Tests run single-threaded: several tests mutate process-global env
+      # vars (DOTVAULT_HOME/CONFIG/etc.) and would race if parallelized.
+      - name: Tests
+        run: cargo test
+        env:
+          RUST_TEST_THREADS: "1"
+
+  coverage:
+    # Coverage is best-effort and Linux-only: cargo-llvm-cov + llvm-tools are
+    # straightforward there, and the per-OS correctness is already covered by
+    # the `test` matrix above.
+    name: Coverage
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Coverage (>80% lines)
+        run: cargo llvm-cov --fail-under-lines 80 --summary-only -- --test-threads=1

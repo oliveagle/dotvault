@@ -1,0 +1,24 @@
+# Build outputs
+/target
+/build/
+/dist/
+/bin/
+/out/
+
+# Binaries
+*.exe
+*.bin
+*.dll
+*.so
+*.dylib
+*.app
+
+# dotvault runtime vault (never commit secrets)
+/.dotvault
+/.dotvault_key
+*.env
+
+# Test coverage
+/coverage/
+*.profraw
+*.profdata

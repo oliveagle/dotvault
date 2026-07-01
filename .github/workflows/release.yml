@@ -1,0 +1,91 @@
+name: Release
+
+# Build per-platform binaries and attach them to a GitHub Release when a `v*`
+# tag is pushed. Binaries are named dotvault-<OS>-<ARCH>.tar.gz (or .zip).
+# The one-line installer (scripts/install.sh) downloads these.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Determine archive name and OS label
+        id: names
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            *apple-darwin)  OS="Darwin" ;;
+            *linux*)        OS="Linux" ;;
+            *windows*)      OS="Windows" ;;
+          esac
+          case "${{ matrix.target }}" in
+            x86_64*)  ARCH="x86_64" ;;
+            aarch64*) ARCH="arm64" ;;
+          esac
+          STAGING="dotvault-${OS}-${ARCH}"
+          echo "staging=${STAGING}" >> "$GITHUB_OUTPUT"
+          echo "asset=${STAGING}.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
+
+      - name: Stage binary (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          STAGING="${{ steps.names.outputs.staging }}"
+          mkdir -p "$STAGING"
+          cp target/${{ matrix.target }}/release/dotvault "$STAGING/"
+          cp README.md "$STAGING/" 2>/dev/null || true
+          tar czf "${{ steps.names.outputs.asset }}" "$STAGING"
+          sha256sum "${{ steps.names.outputs.asset }}" | awk '{print $1}' > "${{ steps.names.outputs.asset }}.sha256"
+
+      - name: Stage binary (windows)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          STAGING="${{ steps.names.outputs.staging }}"
+          mkdir -p "$STAGING"
+          cp target/${{ matrix.target }}/release/dotvault.exe "$STAGING/"
+          cp README.md "$STAGING/" 2>/dev/null || true
+          7z a "${{ steps.names.outputs.asset }}" "$STAGING"
+          sha256sum "${{ steps.names.outputs.asset }}" | awk '{print $1}' > "${{ steps.names.outputs.asset }}.sha256"
+
+      - name: Upload artifacts to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.names.outputs.asset }}
+            ${{ steps.names.outputs.asset }}.sha256
