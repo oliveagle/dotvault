@@ -96,11 +96,12 @@ pub fn expand_tilde(s: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Resolve the user's home directory. Unix uses `HOME`; Windows uses
-/// `USERPROFILE` (then falls back to `HOME` for Cygwin/MSYS shells).
+/// Resolve the user's home directory. `HOME` is checked first (it's the
+/// authority on Unix and is honored when set by Cygwin/MSYS/test harnesses);
+/// Windows falls back to `USERPROFILE` when `HOME` is unset.
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
 }
