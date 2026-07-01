@@ -70,7 +70,8 @@ jobs:
           cp target/${{ matrix.target }}/release/dotvault "$STAGING/"
           cp README.md "$STAGING/" 2>/dev/null || true
           tar czf "${{ steps.names.outputs.asset }}" "$STAGING"
-          sha256sum "${{ steps.names.outputs.asset }}" | awk '{print $1}' > "${{ steps.names.outputs.asset }}.sha256"
+          # shasum -a 256 is portable across macOS and Linux (sha256sum is Linux-only).
+          shasum -a 256 "${{ steps.names.outputs.asset }}" | awk '{print $1}' > "${{ steps.names.outputs.asset }}.sha256"
 
       - name: Stage binary (windows)
         if: matrix.archive == 'zip'
@@ -81,7 +82,8 @@ jobs:
           cp target/${{ matrix.target }}/release/dotvault.exe "$STAGING/"
           cp README.md "$STAGING/" 2>/dev/null || true
           7z a "${{ steps.names.outputs.asset }}" "$STAGING"
-          sha256sum "${{ steps.names.outputs.asset }}" | awk '{print $1}' > "${{ steps.names.outputs.asset }}.sha256"
+          # shasum is available in the Git Bash env on Windows runners.
+          shasum -a 256 "${{ steps.names.outputs.asset }}" | awk '{print $1}' > "${{ steps.names.outputs.asset }}.sha256"
 
       - name: Upload artifacts to the release
         uses: softprops/action-gh-release@v2

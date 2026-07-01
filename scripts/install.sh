@@ -80,11 +80,16 @@ dl() {
 
 dl "$URL" "$TMPDIR/$ARTIFACT" || err "download failed"
 
+# Compute a SHA256 hex digest portably (Linux: sha256sum; macOS: shasum).
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
 # Verify SHA256 if a checksum file is published.
 if dl "$SHA_URL" "$TMPDIR/checksum" 2>/dev/null; then
-  need sha256sum
   EXPECTED="$(tr -d '[:space:]' < "$TMPDIR/checksum")"
-  ACTUAL="$(sha256sum "$TMPDIR/$ARTIFACT" | awk '{print $1}')"
+  ACTUAL="$(sha256 "$TMPDIR/$ARTIFACT")"
   [ "$EXPECTED" = "$ACTUAL" ] || err "checksum mismatch (expected $EXPECTED, got $ACTUAL)"
   info "Checksum verified."
 else
