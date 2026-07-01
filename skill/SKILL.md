@@ -52,6 +52,27 @@ dotvault version
 
 省略 `--key` 的方式:`export DOTVAULT_KEY=~/.ssh/id_ed25519`,或 `dotvault config --set-key <path>`。
 
+## global namespace(跨项目共享的密钥)
+
+`install` 会自动创建一个名为 `global` 的特殊 namespace,access_key 存在 `~/.dotvault/access_key`。适合放跨项目通用的密钥(GITHUB_TOKEN、个人的 SSH passphrase 等)。
+
+```sh
+# 存到 global(显式 --global)
+dotvault --global set GITHUB_TOKEN ghp_xxx
+
+# 项目没有 .dotvault_key 时,set/get/export 自动 fallback 到 global
+dotvault set PERSONAL_API_KEY xxx     # 无 .dotvault_key → 写进 global
+
+# 从 global 导出
+dotvault --global export
+dotvault --global get GITHUB_TOKEN
+
+# 强制用 global(即使项目已绑定)
+dotvault --global list
+```
+
+优先级:`--global` 显式指定 > 项目 `.dotvault_key` > (无 key 文件时)自动 fallback 到 global。
+
 ## 典型工作流
 
 ### 场景 1:项目首次配置密钥

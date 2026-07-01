@@ -11,5 +11,6 @@ pub mod commands;
 pub mod config;
 pub mod crypto;
 pub mod envfmt;
+pub mod skill;
 pub mod util;
 pub mod vault;

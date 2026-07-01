@@ -21,6 +21,10 @@ use crate::envfmt;
 pub const VAULT_FILE: &str = "vault.bin";
 pub const META_FILE: &str = "vault.meta.json";
 
+/// The reserved name of the global namespace (auto-created by `install`,
+/// auto-selected via `--global` or fallback when no project key exists).
+pub const GLOBAL_NAMESPACE: &str = "global";
+
 /// Metadata persisted alongside the encrypted container. Used to verify that
 /// the same SSH key is being used and to carry the KDF salt.
 #[derive(Serialize, Deserialize, Debug, Clone)]

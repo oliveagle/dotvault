@@ -49,6 +49,8 @@ impl AccessKey {
 
     /// Default project path for the access-key file, relative to CWD.
     pub const PROJECT_FILE: &'static str = ".dotvault_key";
+    /// Name of the global access-key file inside ~/.dotvault/.
+    pub const GLOBAL_FILE: &'static str = "access_key";
 
     /// Resolve the project access-key file path:
     /// `DOTVAULT_KEY_FILE` env → `./.dotvault_key`.
@@ -57,6 +59,15 @@ impl AccessKey {
             return Ok(PathBuf::from(p));
         }
         Ok(PathBuf::from(Self::PROJECT_FILE))
+    }
+
+    /// Resolve the global access-key file path (the `global` namespace):
+    /// `DOTVAULT_GLOBAL_KEY_FILE` env → `~/.dotvault/access_key`.
+    pub fn global_path() -> Result<PathBuf> {
+        if let Ok(p) = std::env::var("DOTVAULT_GLOBAL_KEY_FILE") {
+            return Ok(PathBuf::from(p));
+        }
+        Ok(crate::vault::dotvault_home()?.join(Self::GLOBAL_FILE))
     }
 
     /// Read and parse a `.dotvault_key` file.

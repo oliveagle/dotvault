@@ -22,13 +22,32 @@ fn key_path(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// Read the project's `.dotvault_key`, load the named namespace, and verify the
+/// Resolve which access-key file to read. Priority:
+///   `--global` flag  →  ~/.dotvault/access_key (the global namespace)
+///   else project has .dotvault_key  →  use it
+///   else (fallback)  →  ~/.dotvault/access_key (global)
+/// Returns the path to read + a label for diagnostics.
+fn resolve_key_file(use_global: bool) -> Result<(PathBuf, &'static str)> {
+    if use_global {
+        return Ok((AccessKey::global_path()?, "global"));
+    }
+    let project = AccessKey::project_path()?;
+    if project.exists() {
+        Ok((project, "project"))
+    } else {
+        // Auto-fallback to global when no project binding.
+        Ok((AccessKey::global_path()?, "global (fallback)"))
+    }
+}
+
+/// Read the access-key file, load the named namespace, and verify the
 /// access key authorizes it. Returns the loaded vault + the presented key.
-fn load_authorized(key: &Option<PathBuf>) -> Result<(vault::Vault, AccessKey)> {
+fn load_authorized(key: &Option<PathBuf>, use_global: bool) -> Result<(vault::Vault, AccessKey)> {
     let kp = key_path(key.as_deref())?;
-    let key_file = AccessKey::project_path()?;
+    let (key_file, _source) = resolve_key_file(use_global)?;
     let presented = AccessKey::read_from_project(&key_file).with_context(|| {
         format!(
-            "no access key at {} (run `dotvault init <namespace>`)",
+            "no access key at {} (run `dotvault init <namespace>` or `dotvault install` to set up the global namespace)",
             key_file.display()
         )
     })?;
@@ -88,94 +107,51 @@ pub fn install(key: &Option<PathBuf>) -> Result<()> {
         println!("  hint: run `dotvault init <namespace>` to bind one");
     }
 
+    println!("\n[global namespace]");
+    ensure_global_namespace(key)?;
+
     println!("\n[skill]");
-    install_skill(&global_dir)?;
+    crate::skill::install(&global_dir)?;
 
     println!("\nDone. Next: `dotvault init <namespace>` then `dotvault set NAME VALUE`.");
     let _ = key;
     Ok(())
 }
 
-/// Install the dotvault ZCode skill: write SKILL.md to ~/.dotvault/skill/ and
-/// symlink it into ~/.agents/skills/dotvault so the agent discovers it.
-/// Idempotent: never overwrites an existing SKILL.md, refreshes the symlink.
-fn install_skill(global_dir: &Path) -> Result<()> {
-    let skill_dir = global_dir.join("skill");
-    let skill_file = skill_dir.join("SKILL.md");
-    let embedded = include_str!("../skill/SKILL.md");
-
-    // Write the skill file only if missing (never overwrite a user's edits).
-    std::fs::create_dir_all(&skill_dir)
-        .with_context(|| format!("failed to create {}", skill_dir.display()))?;
-    if skill_file.exists() {
-        println!("  exists, left untouched: {}", skill_file.display());
-    } else {
-        std::fs::write(&skill_file, embedded.as_bytes())
-            .with_context(|| format!("failed to write {}", skill_file.display()))?;
-        println!("  wrote: {}", skill_file.display());
+/// Create the `global` namespace + write ~/.dotvault/access_key, unless it
+/// already exists. Idempotent. Best-effort: if the SSH key can't be resolved/
+/// loaded, warn and skip (the rest of install still ran). This is the only
+/// namespace `install` creates.
+fn ensure_global_namespace(key: &Option<PathBuf>) -> Result<()> {
+    let global_key_file = AccessKey::global_path()?;
+    if global_key_file.exists() {
+        println!("  exists, left untouched: {}", global_key_file.display());
+        return Ok(());
     }
-
-    // Symlink ~/.agents/skills/dotvault -> ~/.dotvault/skill so the agent
-    // discovers it. Best-effort: missing ~/.agents/skills is not fatal.
-    if let Some(agents_dir) = agents_skills_dir() {
-        let link = agents_dir.join("dotvault");
-        std::fs::create_dir_all(&agents_dir).ok();
-        // Refresh the symlink: remove existing link/dir-target first.
-        if link.exists() || symlink_exists(&link) {
-            if let Ok(meta) = std::fs::symlink_metadata(&link) {
-                if meta.file_type().is_symlink() {
-                    let _ = std::fs::remove_file(&link);
-                }
-            }
+    // Creating a namespace needs the SSH key to encrypt the registry.
+    let kp = match key_path(key.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("  skipped (could not resolve SSH key: {e})");
+            println!("  hint: pass --key <path> or set it via `dotvault config --set-key`");
+            return Ok(());
         }
-        if !link.exists() && !symlink_exists(&link) {
-            match symlink(&skill_dir, &link) {
-                Ok(()) => println!("  linked: {} -> {}", link.display(), skill_dir.display()),
-                Err(e) => println!(
-                    "  warning: could not link {} (skill is at {}): {e}",
-                    link.display(),
-                    skill_dir.display()
-                ),
-            }
-        } else {
-            println!("  link exists: {}", link.display());
+    };
+    match vault::Vault::init(crate::vault::GLOBAL_NAMESPACE, &kp) {
+        Ok((_v, ak)) => {
+            ak.write_to_project(&global_key_file)?;
+            println!(
+                "  created namespace {:?} + wrote {}",
+                crate::vault::GLOBAL_NAMESPACE,
+                global_key_file.display()
+            );
         }
-    } else {
-        println!(
-            "  (could not locate ~/.agents/skills; skill written to {} only)",
-            skill_dir.display()
-        );
+        Err(e) => {
+            // e.g. namespace dir already exists without the key file (partial state).
+            println!("  could not create global namespace: {e:#}");
+        }
     }
     Ok(())
-}
-
-/// Resolve `~/.agents/skills` (HOME/USERPROFILE based).
-fn agents_skills_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".agents").join("skills"))
-}
-
-/// Whether a path is a symlink (cross-platform).
-fn symlink_exists(p: &Path) -> bool {
-    std::fs::symlink_metadata(p)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
-/// Create a symlink dir→target. On Unix this is std; on Windows it needs a
-/// crate, so we gate it (the skill is a convenience, not core to the binary).
-#[cfg(unix)]
-fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-#[cfg(not(unix))]
-fn symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
-    // Windows symlink creation needs elevated rights or a dev-mode setting +
-    // a symlink crate. Skip gracefully; the user can link manually.
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "symlink not created on Windows automatically",
-    ))
 }
 
 pub fn ns_list() -> Result<()> {
@@ -203,22 +179,27 @@ pub fn ns_remove(namespace: &str, key: &Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-pub fn set(key: &Option<PathBuf>, name: &str, value: &str) -> Result<()> {
-    let (mut v, _) = load_authorized(key)?;
+pub fn set(key: &Option<PathBuf>, global: bool, name: &str, value: &str) -> Result<()> {
+    let (mut v, _) = load_authorized(key, global)?;
     v.set(name, value)?;
     v.save()?;
     eprintln!("Set {} (namespace {:?})", name, v.namespace);
     Ok(())
 }
 
-pub fn get(key: &Option<PathBuf>, name: &str) -> Result<()> {
+pub fn get(key: &Option<PathBuf>, global: bool, name: &str) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    get_to(key, name, &mut lock)
+    get_to(key, global, name, &mut lock)
 }
 
-pub fn get_to<W: Write>(key: &Option<PathBuf>, name: &str, out: &mut W) -> Result<()> {
-    let (v, _) = load_authorized(key)?;
+pub fn get_to<W: Write>(
+    key: &Option<PathBuf>,
+    global: bool,
+    name: &str,
+    out: &mut W,
+) -> Result<()> {
+    let (v, _) = load_authorized(key, global)?;
     match v.get(name) {
         Some(val) => {
             out.write_all(val.as_bytes())?;
@@ -228,8 +209,8 @@ pub fn get_to<W: Write>(key: &Option<PathBuf>, name: &str, out: &mut W) -> Resul
     }
 }
 
-pub fn rm(key: &Option<PathBuf>, name: &str) -> Result<()> {
-    let (mut v, _) = load_authorized(key)?;
+pub fn rm(key: &Option<PathBuf>, global: bool, name: &str) -> Result<()> {
+    let (mut v, _) = load_authorized(key, global)?;
     if !v.remove(name) {
         anyhow::bail!("no such secret: {}", name);
     }
@@ -238,28 +219,28 @@ pub fn rm(key: &Option<PathBuf>, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn list(key: &Option<PathBuf>) -> Result<()> {
+pub fn list(key: &Option<PathBuf>, global: bool) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    list_to(key, &mut lock)
+    list_to(key, global, &mut lock)
 }
 
-pub fn list_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
-    let (v, _) = load_authorized(key)?;
+pub fn list_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
+    let (v, _) = load_authorized(key, global)?;
     for (k, _) in &v.entries {
         writeln!(out, "{k}")?;
     }
     Ok(())
 }
 
-pub fn export(key: &Option<PathBuf>) -> Result<()> {
+pub fn export(key: &Option<PathBuf>, global: bool) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    export_to(key, &mut lock)
+    export_to(key, global, &mut lock)
 }
 
-pub fn export_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
-    let (v, _) = load_authorized(key)?;
+pub fn export_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
+    let (v, _) = load_authorized(key, global)?;
     let doc = crate::envfmt::serialize(&v.entries);
     out.write_all(doc.as_bytes())?;
     Ok(())
@@ -280,10 +261,10 @@ pub fn rekey(key: &Option<PathBuf>, new_key: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn doctor(key: &Option<PathBuf>) -> Result<()> {
+pub fn doctor(key: &Option<PathBuf>, global: bool) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    doctor_to(key, &mut lock)
+    doctor_to(key, global, &mut lock)
 }
 
 /// `dotvault version` — print build details (version, git hash, build time,
@@ -316,12 +297,12 @@ pub fn version_to<W: Write>(out: &mut W) -> Result<()> {
     Ok(())
 }
 
-pub fn doctor_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
+pub fn doctor_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
     let kp = key_path(key.as_deref())?;
-    let key_file = AccessKey::project_path()?;
+    let (key_file, source) = resolve_key_file(global)?;
     if !key_file.exists() {
         anyhow::bail!(
-            "doctor: no access key at {} (run `dotvault init <namespace>`)",
+            "doctor: no access key at {} (run `dotvault init <namespace>` or `dotvault install`)",
             key_file.display()
         );
     }
@@ -329,6 +310,7 @@ pub fn doctor_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     let v = vault::Vault::load(&ak.namespace, &kp)?;
     v.verify_access_key(&ak)?;
     writeln!(out, "namespace       : {}", v.namespace)?;
+    writeln!(out, "source          : {source}")?;
     writeln!(out, "entries         : {}", v.entries.len())?;
     writeln!(out, "ssh fingerprint : {}", v.meta.ssh_fingerprint)?;
     writeln!(out, "created         : {}", v.meta.created_at)?;

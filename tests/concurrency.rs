@@ -82,7 +82,7 @@ env_test!(concurrent_set_distinct_keys_no_loss, {
         let k = key.clone();
         handles.push(std::thread::spawn(move || {
             // Each thread adds its own unique key.
-            commands::set(&k, &format!("K{i}"), &format!("v{i}"))
+            commands::set(&k, false, &format!("K{i}"), &format!("v{i}"))
         }));
     }
     for h in handles {
@@ -204,7 +204,7 @@ env_test!(interleaved_writes_all_commit, {
         handles.push(std::thread::spawn(move || {
             // Sequentially: add own key, then a "shared-counter-style" key that
             // reads-modifies-writes. The lock guarantees each sees the prior.
-            commands::set(&k, &format!("T{i}"), "1").unwrap();
+            commands::set(&k, false, &format!("T{i}"), "1").unwrap();
             // Small spin to increase interleaving odds.
             std::thread::yield_now();
         }));
@@ -254,7 +254,7 @@ env_test!(read_modify_write_is_atomic, {
     let n = 8usize;
 
     // Seed one key so both threads see a non-empty vault.
-    commands::set(&key, "seed", "0").unwrap();
+    commands::set(&key, false, "seed", "0").unwrap();
 
     let mut handles = Vec::new();
     for t in 0..n {

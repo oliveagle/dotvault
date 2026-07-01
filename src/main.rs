@@ -22,6 +22,11 @@ struct Cli {
     #[arg(long)]
     key: Option<PathBuf>,
 
+    /// Use the global namespace (~/.dotvault/access_key) instead of the
+    /// project's .dotvault_key. Also auto-selected when no project key exists.
+    #[arg(long)]
+    global: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -102,11 +107,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Install => commands::install(&cli.key),
         Command::Init { namespace } => commands::init(&namespace, &cli.key),
-        Command::Set { key, value } => commands::set(&cli.key, &key, &value),
-        Command::Get { key } => commands::get(&cli.key, &key),
-        Command::Rm { key } => commands::rm(&cli.key, &key),
-        Command::List => commands::list(&cli.key),
-        Command::Export => commands::export(&cli.key),
+        Command::Set { key, value } => commands::set(&cli.key, cli.global, &key, &value),
+        Command::Get { key } => commands::get(&cli.key, cli.global, &key),
+        Command::Rm { key } => commands::rm(&cli.key, cli.global, &key),
+        Command::List => commands::list(&cli.key, cli.global),
+        Command::Export => commands::export(&cli.key, cli.global),
         Command::Rekey { new_key } => commands::rekey(&cli.key, &new_key),
         Command::Ns { cmd } => match cmd {
             NsCmd::List => commands::ns_list(),
@@ -117,7 +122,7 @@ fn main() -> Result<()> {
             set_backup_dir,
             set_backup_keep,
         } => commands::config(&set_key, &set_backup_dir, &set_backup_keep),
-        Command::Doctor => commands::doctor(&cli.key),
+        Command::Doctor => commands::doctor(&cli.key, cli.global),
         Command::Version => commands::version(),
     }
 }

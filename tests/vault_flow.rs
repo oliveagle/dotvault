@@ -95,9 +95,9 @@ env_test!(set_get_list_export_roundtrip, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
     let k = key_opt(&iso);
-    commands::set(&k, "A", "1").unwrap();
-    commands::set(&k, "B", "two words").unwrap();
-    commands::set(&k, "C", "3").unwrap();
+    commands::set(&k, false, "A", "1").unwrap();
+    commands::set(&k, false, "B", "two words").unwrap();
+    commands::set(&k, false, "C", "3").unwrap();
 
     // Verify via a short-lived load (the lock must be released before the
     // command-layer calls below, which each load again — holding both would
@@ -108,15 +108,15 @@ env_test!(set_get_list_export_roundtrip, {
     } // v dropped → lock released
 
     let mut out = Vec::new();
-    commands::export_to(&k, &mut out).unwrap();
+    commands::export_to(&k, false, &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "A=1\nB=two words\nC=3\n");
 
     let mut out = Vec::new();
-    commands::list_to(&k, &mut out).unwrap();
+    commands::list_to(&k, false, &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "A\nB\nC\n");
 
     let mut out = Vec::new();
-    commands::get_to(&k, "A", &mut out).unwrap();
+    commands::get_to(&k, false, "A", &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "1");
 });
 
@@ -126,28 +126,30 @@ env_test!(set_existing_key_errors, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
     let k = key_opt(&iso);
-    commands::set(&k, "K", "v1").unwrap();
-    let err = commands::set(&k, "K", "v2").err().unwrap();
+    commands::set(&k, false, "K", "v1").unwrap();
+    let err = commands::set(&k, false, "K", "v2").err().unwrap();
     assert!(format!("{err}").contains("already exists"));
 });
 
 env_test!(get_missing_key_errors, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
-    let err = commands::get(&key_opt(&iso), "NOPE").err().unwrap();
+    let err = commands::get(&key_opt(&iso), false, "NOPE").err().unwrap();
     assert!(format!("{err}").contains("no such secret"));
 });
 
 env_test!(rm_missing_key_errors, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
-    let err = commands::rm(&key_opt(&iso), "NOPE").err().unwrap();
+    let err = commands::rm(&key_opt(&iso), false, "NOPE").err().unwrap();
     assert!(format!("{err}").contains("no such secret"));
 });
 
 env_test!(operation_without_key_file_errors, {
     let iso = Iso::new();
-    let err = commands::set(&key_opt(&iso), "X", "1").err().unwrap();
+    let err = commands::set(&key_opt(&iso), false, "X", "1")
+        .err()
+        .unwrap();
     assert!(format!("{err}").contains("no access key"));
 });
 
@@ -156,11 +158,11 @@ env_test!(operation_without_key_file_errors, {
 env_test!(two_namespaces_are_isolated, {
     let iso = Iso::new();
     commands::init("ns-a", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), "SHARED", "from-a").unwrap();
+    commands::set(&key_opt(&iso), false, "SHARED", "from-a").unwrap();
     let ak_a = std::fs::read_to_string(std::env::var("DOTVAULT_KEY_FILE").unwrap()).unwrap();
 
     commands::init("ns-b", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), "SHARED", "from-b").unwrap();
+    commands::set(&key_opt(&iso), false, "SHARED", "from-b").unwrap();
 
     let v_b = vault::Vault::load("ns-b", &iso.key.path).unwrap();
     assert_eq!(v_b.get("SHARED"), Some("from-b"));
@@ -181,7 +183,9 @@ env_test!(access_key_mismatch_is_rejected, {
         "app\n0000000000000000000000000000000000000000000000000000000000000000\n",
     )
     .unwrap();
-    let err = commands::set(&key_opt(&iso), "X", "1").err().unwrap();
+    let err = commands::set(&key_opt(&iso), false, "X", "1")
+        .err()
+        .unwrap();
     assert!(
         format!("{err}").contains("rejected") || format!("{err}").contains("does not match"),
         "got: {err}"
@@ -194,7 +198,9 @@ env_test!(wrong_namespace_in_key_file_is_rejected, {
     let path = std::env::var("DOTVAULT_KEY_FILE").unwrap();
     let ak = AccessKey::read_from_project(std::path::Path::new(&path)).unwrap();
     std::fs::write(&path, format!("other\n{}\n", ak.key_hex())).unwrap();
-    let err = commands::set(&key_opt(&iso), "X", "1").err().unwrap();
+    let err = commands::set(&key_opt(&iso), false, "X", "1")
+        .err()
+        .unwrap();
     assert!(format!("{err}").contains("no vault") || format!("{err}").contains("does not exist"));
 });
 
@@ -204,7 +210,9 @@ env_test!(wrong_ssh_key_is_rejected, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
     let other = TestKey::new();
-    let err = commands::set(&Some(other.path), "X", "1").err().unwrap();
+    let err = commands::set(&Some(other.path), false, "X", "1")
+        .err()
+        .unwrap();
     assert!(format!("{err}").contains("mismatch"));
 });
 
@@ -235,7 +243,7 @@ env_test!(ns_remove_requires_correct_key, {
 env_test!(tampered_container_is_rejected, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), "A", "1").unwrap();
+    commands::set(&key_opt(&iso), false, "A", "1").unwrap();
 
     let bin = vault::namespace_dir("app").unwrap().join("vault.bin");
     let mut data = std::fs::read(&bin).unwrap();
@@ -243,7 +251,7 @@ env_test!(tampered_container_is_rejected, {
     data[i] ^= 0xff;
     std::fs::write(&bin, data).unwrap();
 
-    let err = commands::get(&key_opt(&iso), "A").err().unwrap();
+    let err = commands::get(&key_opt(&iso), false, "A").err().unwrap();
     assert!(format!("{err}").contains("decryption failed"));
 });
 
@@ -252,12 +260,14 @@ env_test!(tampered_container_is_rejected, {
 env_test!(rekey_all_namespaces, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), "SECRET", "hush").unwrap();
+    commands::set(&key_opt(&iso), false, "SECRET", "hush").unwrap();
 
     let new_key = TestKey::new();
     commands::rekey(&key_opt(&iso), &new_key.path).unwrap();
 
-    let err = commands::get(&key_opt(&iso), "SECRET").err().unwrap();
+    let err = commands::get(&key_opt(&iso), false, "SECRET")
+        .err()
+        .unwrap();
     assert!(format!("{err}").contains("mismatch"));
     let v = vault::Vault::load("app", &new_key.path).unwrap();
     assert_eq!(v.get("SECRET"), Some("hush"));
@@ -269,7 +279,7 @@ env_test!(doctor_reports_ok, {
     let iso = Iso::new();
     commands::init("app", &key_opt(&iso)).unwrap();
     let mut out = Vec::new();
-    commands::doctor_to(&key_opt(&iso), &mut out).unwrap();
+    commands::doctor_to(&key_opt(&iso), false, &mut out).unwrap();
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("status          : OK"));
     assert!(s.contains("namespace       : app"));
@@ -277,7 +287,7 @@ env_test!(doctor_reports_ok, {
 
 env_test!(doctor_fails_without_key_file, {
     let iso = Iso::new();
-    let err = commands::doctor(&key_opt(&iso)).err().unwrap();
+    let err = commands::doctor(&key_opt(&iso), false).err().unwrap();
     assert!(format!("{err}").contains("no access key"));
 });
 
@@ -323,14 +333,22 @@ env_test!(install_writes_skill_and_symlinks, {
     assert!(body.contains("name: dotvault"), "skill has wrong name");
 
     // Symlink created under ~/.agents/skills/dotvault pointing at it.
+    // Windows can't create symlinks without privileges, so only assert the
+    // symlink on Unix; on Windows we still verified the SKILL.md file above.
     let link = home.path().join(".agents").join("skills").join("dotvault");
-    assert!(
-        std::fs::symlink_metadata(&link).is_ok(),
-        "skill symlink should exist"
-    );
-    // Reading through the link yields the skill content.
-    let via_link = std::fs::read_to_string(link.join("SKILL.md")).unwrap();
-    assert!(via_link.contains("name: dotvault"));
+    #[cfg(unix)]
+    {
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "skill symlink should exist"
+        );
+        let via_link = std::fs::read_to_string(link.join("SKILL.md")).unwrap();
+        assert!(via_link.contains("name: dotvault"));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = link; // referenced for clarity; symlink not auto-created on Windows.
+    }
 
     std::env::remove_var("DOTVAULT_HOME");
     match old_home {
@@ -369,6 +387,94 @@ env_test!(install_skill_does_not_overwrite_existing, {
         Some(v) => std::env::set_var("HOME", v),
         None => std::env::remove_var("HOME"),
     }
+});
+
+// ---------- global namespace ----------
+
+env_test!(install_creates_global_namespace, {
+    let iso = Iso::new();
+    commands::install(&key_opt(&iso)).unwrap();
+    // global namespace vault + ~/.dotvault/access_key both created.
+    let global_key = dotvault::access::AccessKey::global_path().unwrap();
+    assert!(global_key.exists(), "global access_key should be created");
+    let dir = dotvault::vault::namespace_dir("global").unwrap();
+    assert!(
+        dir.join("vault.bin").exists(),
+        "global namespace vault missing"
+    );
+    let ak = dotvault::access::AccessKey::read_from_project(&global_key).unwrap();
+    assert_eq!(ak.namespace, "global");
+});
+
+env_test!(install_global_is_idempotent, {
+    let iso = Iso::new();
+    commands::install(&key_opt(&iso)).unwrap();
+    let global_key = dotvault::access::AccessKey::global_path().unwrap();
+    let snapshot = std::fs::read(&global_key).unwrap();
+    // Second install must not overwrite the global access key.
+    commands::install(&key_opt(&iso)).unwrap();
+    assert_eq!(
+        std::fs::read(&global_key).unwrap(),
+        snapshot,
+        "global key overwritten"
+    );
+});
+
+env_test!(global_fallback_when_no_project_key, {
+    let iso = Iso::new();
+    commands::install(&key_opt(&iso)).unwrap();
+    // No project .dotvault_key → set should auto-fallback to global.
+    commands::set(&key_opt(&iso), false, "GITHUB_TOKEN", "ghp_abc").unwrap();
+    let v = dotvault::vault::Vault::load("global", &iso.key.path).unwrap();
+    assert_eq!(v.get("GITHUB_TOKEN"), Some("ghp_abc"));
+});
+
+env_test!(global_explicit_flag_forces_global, {
+    let iso = Iso::new();
+    commands::install(&key_opt(&iso)).unwrap();
+    // Bind a project namespace AND put a value there.
+    commands::init("proj", &key_opt(&iso)).unwrap();
+    commands::set(&key_opt(&iso), false, "SHARED", "from-project").unwrap();
+    // --global writes to global, not project.
+    commands::set(&key_opt(&iso), true, "SHARED", "from-global").unwrap();
+
+    let proj = dotvault::vault::Vault::load("proj", &iso.key.path).unwrap();
+    assert_eq!(proj.get("SHARED"), Some("from-project"));
+    let g = dotvault::vault::Vault::load("global", &iso.key.path).unwrap();
+    assert_eq!(g.get("SHARED"), Some("from-global"));
+});
+
+env_test!(global_and_project_are_isolated, {
+    let iso = Iso::new();
+    commands::install(&key_opt(&iso)).unwrap();
+    commands::init("proj", &key_opt(&iso)).unwrap();
+    commands::set(&key_opt(&iso), false, "ONLY_PROJ", "p").unwrap();
+    commands::set(&key_opt(&iso), true, "ONLY_GLOBAL", "g").unwrap();
+
+    // export (project, since .dotvault_key exists) must NOT see ONLY_GLOBAL.
+    let mut out = Vec::new();
+    commands::export_to(&key_opt(&iso), false, &mut out).unwrap();
+    let proj_export = String::from_utf8(out).unwrap();
+    assert!(proj_export.contains("ONLY_PROJ"));
+    assert!(!proj_export.contains("ONLY_GLOBAL"));
+
+    // export --global must NOT see ONLY_PROJ.
+    let mut out = Vec::new();
+    commands::export_to(&key_opt(&iso), true, &mut out).unwrap();
+    let global_export = String::from_utf8(out).unwrap();
+    assert!(global_export.contains("ONLY_GLOBAL"));
+    assert!(!global_export.contains("ONLY_PROJ"));
+});
+
+env_test!(doctor_reports_global_source, {
+    let iso = Iso::new();
+    commands::install(&key_opt(&iso)).unwrap();
+    // No project key → doctor uses global fallback.
+    let mut out = Vec::new();
+    commands::doctor_to(&key_opt(&iso), false, &mut out).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("namespace       : global"));
+    assert!(s.contains("source          : global (fallback)"));
 });
 
 // Keep `sandbox` referenced (used by install tests indirectly via Iso);
