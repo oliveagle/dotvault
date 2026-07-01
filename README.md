@@ -104,6 +104,13 @@ dotvault doctor                        # verify current namespace integrity
 dotvault config [--set-key ...]        # show/set ~/.dotvault/config.toml
 ```
 
+**Upgrading** (not a subcommand — a separate script, since the binary can't
+replace itself while running):
+
+```sh
+scripts/upgrade.sh                     # idempotent: no-op if already latest
+```
+
 Top-level option (must precede the subcommand):
 
 ```

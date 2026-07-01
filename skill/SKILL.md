@@ -10,7 +10,7 @@ description: "用 dotvault 管理项目的加密密钥/API key/token,并以 .env
 
 ## 核心原则
 
-- **先确认环境**:运行 `dotvault version` 确认已安装;若项目根没有 `.dotvault_key`,先 `dotvault init <namespace>`。
+- **先确认环境**:运行 `dotvault version` 确认已安装(若有新版会在 stderr 提示);若项目根没有 `.dotvault_key`,先 `dotvault init <namespace>`。
 - **SSH key 是必须的**:每次操作都要 `--key`(默认 `~/.ssh/id_ed25519`,或设 `DOTVAULT_KEY` 环境变量,或 `dotvault config --set-key`)。
 - **fail-fast,不擅自做主**:`set` 已存在的 key 会报错(先 `rm`);`get`/`rm` 不存在的 key 会报错。绝不静默覆盖。
 - **明文输出走 stdout**:命令提示信息走 stderr,`export`/`get` 的密文走 stdout,可直接重定向。
@@ -47,10 +47,20 @@ dotvault --key ~/.ssh/id_ed25519 ns remove <namespace>
 # 体检 / 换 SSH key / 看版本
 dotvault --key ~/.ssh/id_ed25519 doctor
 dotvault --key ~/.ssh/id_ed25519 rekey --new-key <PATH>
-dotvault version
+dotvault version                       # 输出版本+git hash;若新版可用,stderr 提示一行
 ```
 
 省略 `--key` 的方式:`export DOTVAULT_KEY=~/.ssh/id_ed25519`,或 `dotvault config --set-key <path>`。
+
+## 升级
+
+`dotvault version` 会在 stderr 提示是否有新版(在线检查,缓存 1 小时)。升级用单独的脚本(不是子命令,因为二进制不能在运行时替换自己):
+
+```sh
+scripts/upgrade.sh          # 幂等:已最新就退出 0,否则下载 + sha256 校验 + 替换二进制
+# 或重新跑安装脚本(效果一样):
+curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/scripts/install.sh | bash
+```
 
 ## global namespace(跨项目共享的密钥)
 
