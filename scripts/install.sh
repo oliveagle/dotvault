@@ -47,6 +47,7 @@ detect_platform() {
 # ---------- networking ----------
 
 dl() {
+  # Download URL to file; caller checks the return code (never silent).
   if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
   else wget -qO "$2" "$1"; fi
 }
@@ -55,14 +56,27 @@ latest_tag() {
   local page="https://github.com/${OWNER}/${REPO}/releases/latest"
   # Prefer the releases-page redirect (follows 302 to .../tag/vX.Y.Z). This
   # does NOT consume the rate-limited API, so it survives heavy use.
+  local url=""
   if command -v curl >/dev/null 2>&1; then
-    local url
-    url="$(curl -fsSL -o /dev/null -w '%{url_effective}' --max-time 8 "$page" 2>/dev/null || true)"
-    echo "$url" | grep -oE 'releases/tag/v[0-9][0-9.]*[0-9]' | sed -E 's#releases/tag/##'
+    url="$(curl -fsSL -o /dev/null -w '%{url_effective}' --max-time 8 "$page" 2>&1)" || {
+      err "failed to fetch latest release (curl error). Check your network.\n  URL: $page"
+    }
+  elif command -v wget >/dev/null 2>&1; then
+    # wget doesn't easily report the final URL; grep the redirect target out
+    # of its verbose header (stderr) by following redirects quietly.
+    url="$(wget -S --spider --timeout=8 "$page" 2>&1 | grep -i '^  Location:' | tail -1 | awk '{print $2}')" \
+      || err "failed to fetch latest release (wget error). Check your network.\n  URL: $page"
+    # If wget gave a relative path, reconstruct.
+    case "$url" in
+      releases/tag/*|/oliveagle*) url="https://github.com${url}" ;;
+    esac
   else
-    wget -qO- --timeout=8 --max-redirect=5 "$page" 2>/dev/null \
-      | grep -m1 -oE 'releases/tag/v[0-9][0-9.]*[0-9]' | sed -E 's#releases/tag/##'
+    err "neither curl nor wget found; cannot check for updates."
   fi
+  local tag
+  tag="$(echo "$url" | grep -oE 'releases/tag/v[0-9][0-9.]*[0-9]' | sed -E 's#releases/tag/##')"
+  [ -n "$tag" ] || err "could not parse a release tag from: $url\n  (are there any published releases?)"
+  printf '%s' "$tag"
 }
 
 sha256() {
