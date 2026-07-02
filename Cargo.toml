@@ -1,6 +1,6 @@
 [package]
 name = "dotvault"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "SSH-key encrypted, namespaced secret vault with .env export"
 license = "MIT"
