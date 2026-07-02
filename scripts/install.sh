@@ -52,11 +52,16 @@ dl() {
 }
 
 latest_tag() {
-  local api="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
+  local page="https://github.com/${OWNER}/${REPO}/releases/latest"
+  # Prefer the releases-page redirect (follows 302 to .../tag/vX.Y.Z). This
+  # does NOT consume the rate-limited API, so it survives heavy use.
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --max-time 5 "$api" 2>/dev/null | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+    local url
+    url="$(curl -fsSL -o /dev/null -w '%{url_effective}' --max-time 8 "$page" 2>/dev/null || true)"
+    echo "$url" | grep -oE 'releases/tag/v[0-9][0-9.]*[0-9]' | sed -E 's#releases/tag/##'
   else
-    wget -qO- --timeout=5 "$api" 2>/dev/null | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+    wget -qO- --timeout=8 --max-redirect=5 "$page" 2>/dev/null \
+      | grep -m1 -oE 'releases/tag/v[0-9][0-9.]*[0-9]' | sed -E 's#releases/tag/##'
   fi
 }
 
