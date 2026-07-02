@@ -81,11 +81,15 @@ Project keys override global ones on name collisions:
 ```
 # === global ===
 GITHUB_TOKEN=ghp_xxx
+# API_TOKEN  # overridden by project
 
 # === namespace: myapp ===
 DB_PASSWORD=s3cret
-GITHUB_TOKEN=ghp_project_specific   # overrides the global one
+API_TOKEN=ghp_project_specific
 ```
+
+Overridden global keys appear as commented-out markers (`# KEY  # overridden`)
+in the global section — invisible to `.env` tools but visible when debugging.
 
 Capture a single secret in a shell:
 

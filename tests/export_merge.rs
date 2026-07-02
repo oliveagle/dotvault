@@ -76,9 +76,15 @@ env_test!(export_merges_global_and_project_with_sections, {
         "project version must win: {s}"
     );
     assert!(s.contains("B=pb"));
+    // global's SHARED value must NOT be active (project wins), but the key
+    // is shown as a commented-out, overridden marker for debuggability.
     assert!(
         !s.contains("SHARED=g-shared"),
-        "global SHARED should be overridden/hidden: {s}"
+        "global SHARED value must not appear active: {s}"
+    );
+    assert!(
+        s.contains("# SHARED  # overridden by project"),
+        "overridden global key should be shown as a comment marker: {s}"
     );
 });
 
