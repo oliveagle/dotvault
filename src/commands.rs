@@ -226,11 +226,9 @@ pub fn list(key: &Option<PathBuf>, global: bool) -> Result<()> {
 }
 
 pub fn list_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
-    let (v, _) = load_authorized(key, global)?;
-    for (k, _) in &v.entries {
-        writeln!(out, "{k}")?;
-    }
-    Ok(())
+    let kp = key_path(key.as_deref())?;
+    let sections = crate::export_render::collect_sections(&kp, global)?;
+    crate::export_render::render_keys(out, &sections)
 }
 
 pub fn export(key: &Option<PathBuf>, global: bool) -> Result<()> {
@@ -240,10 +238,9 @@ pub fn export(key: &Option<PathBuf>, global: bool) -> Result<()> {
 }
 
 pub fn export_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
-    let (v, _) = load_authorized(key, global)?;
-    let doc = crate::envfmt::serialize(&v.entries);
-    out.write_all(doc.as_bytes())?;
-    Ok(())
+    let kp = key_path(key.as_deref())?;
+    let sections = crate::export_render::collect_sections(&kp, global)?;
+    crate::export_render::render_kv(out, &sections)
 }
 
 pub fn rekey(key: &Option<PathBuf>, new_key: &Path) -> Result<()> {

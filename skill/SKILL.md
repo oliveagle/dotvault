@@ -62,6 +62,21 @@ scripts/upgrade.sh          # 幂等:已最新就退出 0,否则下载 + sha256 
 curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/scripts/install.sh | bash
 ```
 
+## export / list 合并 global + project
+
+`export` 和 `list` 会**合并 global 和 project 两个 namespace**,用 `# === <ns> ===` 注释行分区(project 在后,覆盖 global 的同名 key)。输出符合 .env 语法(`#` 开头的行被 dotenv 工具忽略):
+
+```
+# === global ===
+GITHUB_TOKEN=ghp_xxx
+# === namespace: myapp ===
+DB_PASSWORD=s3cret
+```
+
+- 同名 key:project 的赢(global 区不显示被覆盖的)。
+- 加 `--global`:只导出 global(不合并)。
+- 无项目 `.dotvault_key`:只导出 global。
+
 ## global namespace(跨项目共享的密钥)
 
 `install` 会自动创建一个名为 `global` 的特殊 namespace,access_key 存在 `~/.dotvault/access_key`。适合放跨项目通用的密钥(GITHUB_TOKEN、个人的 SSH passphrase 等)。

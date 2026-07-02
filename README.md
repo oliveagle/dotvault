@@ -68,10 +68,23 @@ dotvault init myapp              # bind THIS project to namespace "myapp"
 dotvault set DB_PASSWORD s3cret  # store a secret in namespace "myapp"
 dotvault set API_TOKEN ghp_xyz
 
-dotvault list                    # names in the current namespace
-dotvault export                  # all KEY=VALUE lines to stdout
-dotvault export > .env           # write a .env file
+dotvault list                    # secret names (global + project sections)
+dotvault export                  # KEY=VALUE from global + project, sectioned
+dotvault export > .env           # write a .env file (comments are ignored)
 dotvault get API_TOKEN           # value only, no trailing newline
+```
+
+`export` and `list` merge the global namespace with the project's namespace,
+separated by `# === <ns> ===` comment headers (ignored by `.env` tools).
+Project keys override global ones on name collisions:
+
+```
+# === global ===
+GITHUB_TOKEN=ghp_xxx
+
+# === namespace: myapp ===
+DB_PASSWORD=s3cret
+GITHUB_TOKEN=ghp_project_specific   # overrides the global one
 ```
 
 Capture a single secret in a shell:
@@ -94,8 +107,8 @@ dotvault init <NAMESPACE>              # create namespace + bind project (.dotva
 dotvault set <KEY> <VALUE>             # add a secret (errors if KEY exists — rm first)
 dotvault get <KEY>                     # value to stdout, no trailing newline
 dotvault rm <KEY>                      # remove a secret (errors if absent)
-dotvault list                          # secret names in current namespace
-dotvault export                        # all KEY=VALUE lines to stdout
+dotvault list                          # secret names, global + project sections
+dotvault export                        # KEY=VALUE from global + project, sectioned
 dotvault ns list                       # list all namespaces
 dotvault ns remove <NAMESPACE>         # delete a namespace (needs SSH key)
 dotvault rekey --new-key <PATH>        # re-encrypt ALL namespaces with a new SSH key

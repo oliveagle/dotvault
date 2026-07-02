@@ -109,11 +109,17 @@ env_test!(set_get_list_export_roundtrip, {
 
     let mut out = Vec::new();
     commands::export_to(&k, false, &mut out).unwrap();
-    assert_eq!(String::from_utf8(out).unwrap(), "A=1\nB=two words\nC=3\n");
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "# === namespace: app ===\nA=1\nB=two words\nC=3\n\n"
+    );
 
     let mut out = Vec::new();
     commands::list_to(&k, false, &mut out).unwrap();
-    assert_eq!(String::from_utf8(out).unwrap(), "A\nB\nC\n");
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "# === namespace: app ===\nA\nB\nC\n\n"
+    );
 
     let mut out = Vec::new();
     commands::get_to(&k, false, "A", &mut out).unwrap();
@@ -445,26 +451,23 @@ env_test!(global_explicit_flag_forces_global, {
 });
 
 env_test!(global_and_project_are_isolated, {
+    // Storage isolation: each namespace's vault only has its own keys.
     let iso = Iso::new();
     commands::install(&key_opt(&iso)).unwrap();
     commands::init("proj", &key_opt(&iso)).unwrap();
     commands::set(&key_opt(&iso), false, "ONLY_PROJ", "p").unwrap();
     commands::set(&key_opt(&iso), true, "ONLY_GLOBAL", "g").unwrap();
 
-    // export (project, since .dotvault_key exists) must NOT see ONLY_GLOBAL.
-    let mut out = Vec::new();
-    commands::export_to(&key_opt(&iso), false, &mut out).unwrap();
-    let proj_export = String::from_utf8(out).unwrap();
-    assert!(proj_export.contains("ONLY_PROJ"));
-    assert!(!proj_export.contains("ONLY_GLOBAL"));
+    let proj = dotvault::vault::Vault::load("proj", &iso.key.path).unwrap();
+    assert_eq!(proj.get("ONLY_PROJ"), Some("p"));
+    assert_eq!(proj.get("ONLY_GLOBAL"), None);
 
-    // export --global must NOT see ONLY_PROJ.
-    let mut out = Vec::new();
-    commands::export_to(&key_opt(&iso), true, &mut out).unwrap();
-    let global_export = String::from_utf8(out).unwrap();
-    assert!(global_export.contains("ONLY_GLOBAL"));
-    assert!(!global_export.contains("ONLY_PROJ"));
+    let g = dotvault::vault::Vault::load("global", &iso.key.path).unwrap();
+    assert_eq!(g.get("ONLY_GLOBAL"), Some("g"));
+    assert_eq!(g.get("ONLY_PROJ"), None);
 });
+
+// ---------- merged export/list tests are in tests/export_merge.rs ----------
 
 env_test!(doctor_reports_global_source, {
     let iso = Iso::new();
