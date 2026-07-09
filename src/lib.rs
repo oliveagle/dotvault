@@ -1,9 +1,11 @@
-//! dotvault — SSH-key encrypted secret vault with `.env` export. (library)
+//! dotvault — SSH-key encrypted, multi-recipient secret vault with `.env`
+//! export. (library)
 //!
-//! Secrets live in a single AES-256-GCM container under a vault directory,
-//! encrypted with a key derived (HKDF-SHA256) from an SSH private key. This
-//! crate exposes the vault logic so it can be reused by the CLI binary and by
-//! integration tests.
+//! Secrets live in a project-local `.vault` file (an age container encrypted
+//! to every authorized SSH public key in `.vault.keys`). Any single
+//! authorized private key can decrypt. Both files are committed to git so a
+//! team shares secrets. This crate exposes the vault logic so it can be reused
+//! by the CLI binary and by integration tests.
 
 pub mod access;
 pub mod backup;

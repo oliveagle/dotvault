@@ -1,17 +1,17 @@
-//! Per-subcommand logic (v0.2: centralized, namespaced storage).
+//! Per-subcommand logic (v0.4: project-local, multi-recipient vault).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
-use crate::access::AccessKey;
+use crate::access::{self};
 use crate::vault;
 
 /// Resolve and load the SSH key path from explicit flag / env / default.
 /// Warns on stderr when the default key is used implicitly.
 fn key_path(explicit: Option<&Path>) -> Result<PathBuf> {
-    let (path, used_default) = vault::Vault::resolve_key_path(explicit)?;
+    let (path, used_default) = resolve_ssh_key_path(explicit)?;
     if used_default {
         eprintln!(
             "warning: no --key given and DOTVAULT_KEY unset; using default key {}",
@@ -21,62 +21,76 @@ fn key_path(explicit: Option<&Path>) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Read the project's `.dotvault_key`, load the named namespace, and verify the
-/// Resolve which access-key file to read. Priority:
-///   `--global` flag  →  ~/.dotvault/access_key (the global namespace)
-///   else project has .dotvault_key  →  use it
-///   else (fallback)  →  ~/.dotvault/access_key (global)
-/// Returns the path to read + a label for diagnostics.
-fn resolve_key_file(use_global: bool) -> Result<(PathBuf, &'static str)> {
-    if use_global {
-        return Ok((AccessKey::global_path()?, "global"));
+/// Resolve the SSH key path: `--key` flag → `DOTVAULT_KEY` env → config →
+/// default `~/.ssh/id_ed25519`. Returns the path + whether the default was
+/// used implicitly (for a warning).
+fn resolve_ssh_key_path(explicit: Option<&Path>) -> Result<(PathBuf, bool)> {
+    if let Some(p) = explicit {
+        return Ok((p.to_path_buf(), false));
     }
-    let project = AccessKey::project_path()?;
-    if project.exists() {
-        Ok((project, "project"))
-    } else {
-        // Auto-fallback to global when no project binding.
-        Ok((AccessKey::global_path()?, "global (fallback)"))
+    if let Some(p) = std::env::var_os("DOTVAULT_KEY") {
+        return Ok((PathBuf::from(p), false));
     }
+    if let Ok(cfg) = crate::config::Config::load() {
+        if let Some(p) = cfg.key_path() {
+            return Ok((p, false));
+        }
+    }
+    // Default.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("HOME not set; cannot locate default SSH key")?;
+    Ok((home.join(".ssh").join("id_ed25519"), true))
 }
 
-/// Read the access-key file, load the named namespace, and verify the
-/// access key authorizes it. Returns the loaded vault + the presented key.
-fn load_authorized(key: &Option<PathBuf>, use_global: bool) -> Result<(vault::Vault, AccessKey)> {
-    let kp = key_path(key.as_deref())?;
-    let (key_file, _source) = resolve_key_file(use_global)?;
-    let presented = AccessKey::read_from_project(&key_file).with_context(|| {
-        format!(
-            "no access key at {} (run `dotvault init <namespace>` or `dotvault install` to set up the global namespace)",
-            key_file.display()
-        )
-    })?;
-    let v = vault::Vault::load(&presented.namespace, &kp)?;
-    v.verify_access_key(&presented)?;
-    Ok((v, presented))
+/// Derive the public-key line for the initial recipient during `init`.
+/// Reads `<ssh_key_path>.pub` if it exists; otherwise derives the public key
+/// from the private key.
+fn pubkey_line_for(ssh_key_path: &Path) -> Result<String> {
+    let pub_path = ssh_key_path.with_extension("pub");
+    if pub_path.is_file() {
+        let text = std::fs::read_to_string(&pub_path)
+            .with_context(|| format!("failed to read {}", pub_path.display()))?;
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .context("public key file is empty")?;
+        return Ok(line.to_string());
+    }
+    // Derive from the private key.
+    let sk = crate::crypto::load_private_key(ssh_key_path)?;
+    crate::crypto::pubkey_to_line(sk.public_key())
 }
 
-pub fn init(namespace: &str, key: &Option<PathBuf>) -> Result<()> {
+/// Initialize a new project vault: write `.vault` (empty) + `.vault.keys`
+/// seeded with the current user's public key.
+pub fn init(key: &Option<PathBuf>) -> Result<()> {
     let kp = key_path(key.as_deref())?;
-    let (v, access_key) = vault::Vault::init(namespace, &kp)?;
-    let key_file = AccessKey::project_path()?;
-    access_key.write_to_project(&key_file)?;
+    let pubkey_line = pubkey_line_for(&kp)?;
+    let v = vault::Vault::init(&kp, &pubkey_line)?;
+    let fp = crate::crypto::ssh_fingerprint(&v.ssh_key);
     eprintln!(
-        "Initialized namespace {:?} (key {}) — wrote {}",
-        namespace,
-        v.meta.ssh_fingerprint,
-        key_file.display()
+        "Initialized project vault at {} ({} authorized key)",
+        v.dir.join(vault::VAULT_FILE).display(),
+        v.keys.len()
     );
+    eprintln!("  your key: {}", fp);
+    eprintln!();
+    eprintln!("Next: `dotvault set NAME VALUE` to add a secret.");
+    eprintln!("      `dotvault add-key <PUBKEY>` to authorize a teammate.");
     Ok(())
 }
 
+/// `dotvault install` — global environment setup: create `~/.dotvault` +
+/// default config + install the agent skill. Idempotent; no secrets stored.
 pub fn install(key: &Option<PathBuf>) -> Result<()> {
     println!("dotvault install — environment setup\n");
 
     let global_dir = vault::dotvault_home()?;
     ensure_dir(&global_dir, "global dir")?;
     ensure_dir(&global_dir.join("backups"), "backups")?;
-    ensure_dir(&global_dir.join("namespaces"), "namespaces")?;
 
     let cfg_path = crate::config::Config::path()?;
     println!("\n[config]");
@@ -97,175 +111,135 @@ pub fn install(key: &Option<PathBuf>) -> Result<()> {
     println!("\n[ssh key]");
     check_default_ssh_key();
 
-    println!("\n[access keys]");
-    let key_file = AccessKey::project_path()?;
-    if key_file.exists() {
-        let ak = AccessKey::read_from_project(&key_file)?;
-        println!("  project bound to namespace {:?}", ak.namespace);
+    println!("\n[project vault]");
+    let vpath = vault::vault_path()?;
+    if vpath.exists() {
+        println!("  bound: {}", vpath.display());
     } else {
-        println!("  no .dotvault_key in this project");
-        println!("  hint: run `dotvault init <namespace>` to bind one");
+        println!("  no vault in this project");
+        println!("  hint: run `dotvault init` to create one");
     }
-
-    println!("\n[global namespace]");
-    ensure_global_namespace(key)?;
 
     println!("\n[skill]");
     crate::skill::install(&global_dir)?;
 
-    println!("\nDone. Next: `dotvault init <namespace>` then `dotvault set NAME VALUE`.");
+    println!("\nDone. Next: `dotvault init` then `dotvault set NAME VALUE`.");
     let _ = key;
     Ok(())
 }
 
-/// Create the `global` namespace + write ~/.dotvault/access_key, unless it
-/// already exists. Idempotent. Best-effort: if the SSH key can't be resolved/
-/// loaded, warn and skip (the rest of install still ran). This is the only
-/// namespace `install` creates.
-fn ensure_global_namespace(key: &Option<PathBuf>) -> Result<()> {
-    let global_key_file = AccessKey::global_path()?;
-    if global_key_file.exists() {
-        println!("  exists, left untouched: {}", global_key_file.display());
-        return Ok(());
-    }
-    // Creating a namespace needs the SSH key to encrypt the registry.
-    let kp = match key_path(key.as_deref()) {
-        Ok(p) => p,
-        Err(e) => {
-            println!("  skipped (could not resolve SSH key: {e})");
-            println!("  hint: pass --key <path> or set it via `dotvault config --set-key`");
-            return Ok(());
-        }
-    };
-    match vault::Vault::init(crate::vault::GLOBAL_NAMESPACE, &kp) {
-        Ok((_v, ak)) => {
-            ak.write_to_project(&global_key_file)?;
-            println!(
-                "  created namespace {:?} + wrote {}",
-                crate::vault::GLOBAL_NAMESPACE,
-                global_key_file.display()
-            );
-        }
-        Err(e) => {
-            // e.g. namespace dir already exists without the key file (partial state).
-            println!("  could not create global namespace: {e:#}");
-        }
-    }
-    Ok(())
-}
-
-pub fn ns_list() -> Result<()> {
-    let names = vault::list_namespaces()?;
-    if names.is_empty() {
-        eprintln!("no namespaces yet");
-    } else {
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        for n in names {
-            writeln!(lock, "{n}")?;
-        }
-    }
-    Ok(())
-}
-
-pub fn ns_remove(namespace: &str, key: &Option<PathBuf>) -> Result<()> {
+pub fn set(key: &Option<PathBuf>, name: &str, value: &str) -> Result<()> {
     let kp = key_path(key.as_deref())?;
-    let removed = vault::remove_namespace(namespace, &kp)?;
-    if removed {
-        eprintln!("Removed namespace {:?}", namespace);
-    } else {
-        eprintln!("namespace {:?} did not exist", namespace);
-    }
-    Ok(())
-}
-
-pub fn set(key: &Option<PathBuf>, global: bool, name: &str, value: &str) -> Result<()> {
-    let (mut v, _) = load_authorized(key, global)?;
+    let mut v = vault::Vault::load(&kp)?;
     v.set(name, value)?;
     v.save()?;
-    eprintln!("Set {} (namespace {:?})", name, v.namespace);
+    eprintln!("Set {}", name);
     Ok(())
 }
 
-pub fn get(key: &Option<PathBuf>, global: bool, name: &str) -> Result<()> {
+pub fn get(key: &Option<PathBuf>, name: &str) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    get_to(key, global, name, &mut lock)
+    get_to(key, name, &mut lock)
 }
 
-pub fn get_to<W: Write>(
-    key: &Option<PathBuf>,
-    global: bool,
-    name: &str,
-    out: &mut W,
-) -> Result<()> {
-    let (v, _) = load_authorized(key, global)?;
+pub fn get_to<W: Write>(key: &Option<PathBuf>, name: &str, out: &mut W) -> Result<()> {
+    let kp = key_path(key.as_deref())?;
+    let v = vault::Vault::load(&kp)?;
     match v.get(name) {
         Some(val) => {
             out.write_all(val.as_bytes())?;
             Ok(())
         }
-        None => anyhow::bail!("no such secret: {}", name),
+        None => bail!("no such secret: {}", name),
     }
 }
 
-pub fn rm(key: &Option<PathBuf>, global: bool, name: &str) -> Result<()> {
-    let (mut v, _) = load_authorized(key, global)?;
+pub fn rm(key: &Option<PathBuf>, name: &str) -> Result<()> {
+    let kp = key_path(key.as_deref())?;
+    let mut v = vault::Vault::load(&kp)?;
     if !v.remove(name) {
-        anyhow::bail!("no such secret: {}", name);
+        bail!("no such secret: {}", name);
     }
     v.save()?;
-    eprintln!("Removed {} (namespace {:?})", name, v.namespace);
+    eprintln!("Removed {}", name);
     Ok(())
 }
 
-pub fn list(key: &Option<PathBuf>, global: bool) -> Result<()> {
+pub fn list(key: &Option<PathBuf>) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    list_to(key, global, &mut lock)
+    list_to(key, &mut lock)
 }
 
-pub fn list_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
+pub fn list_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     let kp = key_path(key.as_deref())?;
-    let sections = crate::export_render::collect_sections(&kp, global)?;
+    let v = vault::Vault::load(&kp)?;
+    let sections = crate::export_render::collect_sections(&v);
+    if sections.is_empty() {
+        eprintln!("(vault is empty)");
+    }
     crate::export_render::render_keys(out, &sections)
 }
 
-pub fn export(key: &Option<PathBuf>, global: bool) -> Result<()> {
+pub fn export(key: &Option<PathBuf>) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    export_to(key, global, &mut lock)
+    export_to(key, &mut lock)
 }
 
-pub fn export_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
+pub fn export_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     let kp = key_path(key.as_deref())?;
-    let sections = crate::export_render::collect_sections(&kp, global)?;
+    let v = vault::Vault::load(&kp)?;
+    let sections = crate::export_render::collect_sections(&v);
     crate::export_render::render_kv(out, &sections)
 }
 
-pub fn rekey(key: &Option<PathBuf>, new_key: &Path) -> Result<()> {
+/// Add a recipient's public key to the vault and re-encrypt so they can
+/// decrypt. `spec` is an authorized-keys line, a `*.pub` file path, or
+/// `@file` reference.
+pub fn add_key(key: &Option<PathBuf>, spec: &str) -> Result<()> {
     let kp = key_path(key.as_deref())?;
-    let namespaces = vault::list_namespaces()?;
-    if namespaces.is_empty() {
-        anyhow::bail!("no namespaces to re-key");
-    }
-    for ns in &namespaces {
-        let mut v = vault::Vault::load(ns, &kp)?;
-        let new_fp = v.rekey(new_key)?;
-        println!("Re-keyed namespace {:?} → {}", ns, new_fp);
-    }
-    eprintln!("Done. Remember to update your projects' SSH key access.");
+    let pubkey_line = access::resolve_pubkey_spec(spec)?;
+    let mut v = vault::Vault::load(&kp)?;
+    let fp = v.add_key(&pubkey_line)?;
+    println!("Added key {} (now {} authorized)", fp, v.keys.len());
     Ok(())
 }
 
-pub fn doctor(key: &Option<PathBuf>, global: bool) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
-    doctor_to(key, global, &mut lock)
+/// Remove a recipient by fingerprint or label and re-encrypt.
+pub fn remove_key(key: &Option<PathBuf>, query: &str) -> Result<()> {
+    let kp = key_path(key.as_deref())?;
+    let mut v = vault::Vault::load(&kp)?;
+    let removed = v.remove_key(query)?;
+    println!(
+        "Removed key {} ({}) — {} authorized remain",
+        removed.fingerprint,
+        removed.label,
+        v.keys.len()
+    );
+    eprintln!("note: this does NOT revoke access to ciphertext already in git history;");
+    eprintln!("      rotate secret values if a true revocation is required.");
+    Ok(())
 }
 
-/// `dotvault version` — print build details (version, git hash, build time,
-/// rustc, target). The values are injected at compile time by build.rs.
+/// List the authorized recipients.
+pub fn list_keys(key: &Option<PathBuf>) -> Result<()> {
+    let kp = key_path(key.as_deref())?;
+    let v = vault::Vault::load(&kp)?;
+    let my_fp = crate::crypto::ssh_fingerprint(&v.ssh_key);
+    if v.keys.is_empty() {
+        eprintln!("(no authorized keys)");
+    }
+    for k in &v.keys.keys {
+        let mark = if k.fingerprint == my_fp { " *" } else { "  " };
+        println!("{}{}  {}", mark, k.fingerprint, k.label);
+    }
+    eprintln!("\n(*) = matches the key used for this command");
+    Ok(())
+}
+
+/// `dotvault version` — print build details.
 pub fn version() -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
@@ -273,8 +247,6 @@ pub fn version() -> Result<()> {
 }
 
 pub fn version_to<W: Write>(out: &mut W) -> Result<()> {
-    // env! reads values injected by build.rs; the fallback literal is used
-    // when git wasn't available at build time.
     let ver = env!("CARGO_PKG_VERSION");
     let hash = option_env!("DOTVAULT_GIT_HASH").unwrap_or("unknown");
     let dirty = option_env!("DOTVAULT_GIT_DIRTY").unwrap_or("false") == "true";
@@ -292,34 +264,39 @@ pub fn version_to<W: Write>(out: &mut W) -> Result<()> {
     writeln!(out, "rustc:  {rustc}")?;
     writeln!(out, "target: {target}")?;
 
-    // Online update check (best-effort, cached 1h, never blocks/fails).
-    // Goes to stderr so stdout stays parseable.
     if let Some(latest) = crate::update::cached_latest_release_tag() {
         if crate::update::is_newer(&latest, ver) {
-            eprintln!("update: {latest} available (run: scripts/upgrade.sh or curl ... | bash)");
+            eprintln!("update: {latest} available");
         }
     }
     Ok(())
 }
 
-pub fn doctor_to<W: Write>(key: &Option<PathBuf>, global: bool, out: &mut W) -> Result<()> {
+/// Verify the project vault: decrypt, report entries + authorized keys.
+pub fn doctor(key: &Option<PathBuf>) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    doctor_to(key, &mut lock)
+}
+
+pub fn doctor_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     let kp = key_path(key.as_deref())?;
-    let (key_file, source) = resolve_key_file(global)?;
-    if !key_file.exists() {
-        anyhow::bail!(
-            "doctor: no access key at {} (run `dotvault init <namespace>` or `dotvault install`)",
-            key_file.display()
-        );
-    }
-    let ak = AccessKey::read_from_project(&key_file)?;
-    let v = vault::Vault::load(&ak.namespace, &kp)?;
-    v.verify_access_key(&ak)?;
-    writeln!(out, "namespace       : {}", v.namespace)?;
-    writeln!(out, "source          : {source}")?;
+    let v = match vault::Vault::load(&kp) {
+        Ok(v) => v,
+        Err(e) => bail!("doctor: could not open vault: {e:#}"),
+    };
+    let my_fp = crate::crypto::ssh_fingerprint(&v.ssh_key);
+    writeln!(
+        out,
+        "vault           : {}",
+        v.dir.join(vault::VAULT_FILE).display()
+    )?;
     writeln!(out, "entries         : {}", v.entries.len())?;
-    writeln!(out, "ssh fingerprint : {}", v.meta.ssh_fingerprint)?;
-    writeln!(out, "created         : {}", v.meta.created_at)?;
-    writeln!(out, "updated         : {}", v.meta.updated_at)?;
+    writeln!(out, "authorized keys : {}", v.keys.len())?;
+    for k in &v.keys.keys {
+        let mark = if k.fingerprint == my_fp { "*" } else { " " };
+        writeln!(out, "  {mark} {}  {}", k.fingerprint, k.label)?;
+    }
     writeln!(out, "status          : OK")?;
     Ok(())
 }
@@ -420,6 +397,15 @@ fn check_default_ssh_key() {
             }
         }
         Err(e) => println!("  could not read key: {e}"),
+    }
+    let pub_key = default_key.with_extension("pub");
+    if pub_key.exists() {
+        println!(
+            "  pubkey: {} (used as the initial recipient)",
+            pub_key.display()
+        );
+    } else {
+        println!("  pubkey: not found — `dotvault init` will derive it from the private key");
     }
 }
 

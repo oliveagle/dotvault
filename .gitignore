@@ -7,16 +7,23 @@
 
 # Binaries
 *.exe
-*.bin
 *.dll
 *.so
 *.dylib
 *.app
 
-# dotvault runtime vault (never commit secrets)
-/.dotvault
-/.dotvault_key
+# dotvault: .vault and .vault.keys ARE committed (encrypted + public keys).
+# Only the lock file is local.
+/.vault.lock
 *.env
+
+# Local dotvault artifacts (smoke tests run against this repo itself).
+/.vault
+/.vault.keys
+/.dotvault/
+
+# Editor / tool caches
+/.zcode/
 
 # Test coverage
 /coverage/

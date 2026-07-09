@@ -1,8 +1,8 @@
 [package]
 name = "dotvault"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "SSH-key encrypted, namespaced secret vault with .env export"
+description = "SSH-key encrypted, multi-recipient secret vault with .env export"
 license = "MIT"
 
 [lib]
@@ -11,10 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-ssh-key = { version = "0.6", features = ["encryption", "ed25519", "rsa"] }
-aes-gcm = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
+ssh-key = { version = "0.6", features = ["ed25519", "encryption", "alloc"] }
+age = { version = "0.11", features = ["ssh"] }
 rand = "0.8"
 rpassword = "7"
 anyhow = "1"
@@ -24,4 +22,4 @@ toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
-ssh-key = { version = "0.6", features = ["encryption", "ed25519"] }
+ssh-key = { version = "0.6", features = ["ed25519", "encryption", "alloc"] }

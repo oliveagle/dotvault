@@ -1,13 +1,14 @@
-//! Strict concurrency tests for the namespace file-locking.
+//! Strict concurrency tests for the project-vault file-locking.
 //!
-//! These tests run real OS threads that race for the same namespace and verify
-//! the exclusive `flock` serializes the read-modify-write cycle so that:
+//! These tests run real OS threads that race for the same project `.vault`
+//! and verify the exclusive lock serializes the read-modify-write cycle so
+//! that:
 //!   - no `set` is silently lost (lost-update bug),
 //!   - the lock actually blocks (not a no-op),
-//!   - concurrent `init` of the same namespace has exactly one winner.
+//!   - concurrent `init` of the same project has exactly one winner.
 //!
-//! Each test sets DOTVAULT_HOME/BACKUP_DIR/CONFIG/KEY_FILE into a temp dir and
-//! runs single-threaded at the cargo level (these tests spawn their own
+//! Each test sets DOTVAULT_HOME/BACKUP_DIR/CONFIG/VAULT_DIR into a temp dir
+//! and runs single-threaded at the cargo level (these tests spawn their own
 //! threads internally), so they use the shared `env_lock` to avoid colliding
 //! with env-mutating tests in the other file.
 
@@ -37,7 +38,7 @@ macro_rules! env_test {
 }
 
 /// Isolated environment: temp DOTVAULT_HOME/backups/config + a temp project
-/// dir as CWD holding `.dotvault_key`.
+/// dir as CWD + DOTVAULT_VAULT_DIR that will hold `.vault` / `.vault.keys`.
 struct Iso {
     _home: tempfile::TempDir,
     _project: tempfile::TempDir,
@@ -51,8 +52,8 @@ impl Iso {
         std::env::set_var("DOTVAULT_HOME", home.path());
         std::env::set_var("DOTVAULT_BACKUP_DIR", home.path().join("backups"));
         std::env::set_var("DOTVAULT_CONFIG", home.path().join("config.toml"));
+        std::env::set_var("DOTVAULT_VAULT_DIR", project.path());
         std::env::set_current_dir(project.path()).unwrap();
-        std::env::set_var("DOTVAULT_KEY_FILE", project.path().join(".dotvault_key"));
         Self {
             _home: home,
             _project: project,
@@ -62,6 +63,10 @@ impl Iso {
 
     fn key_path(&self) -> std::path::PathBuf {
         self.key.path.clone()
+    }
+
+    fn key_opt(&self) -> Option<std::path::PathBuf> {
+        Some(self.key.path.clone())
     }
 }
 
@@ -73,8 +78,8 @@ impl Iso {
 // =========================================================================
 env_test!(concurrent_set_distinct_keys_no_loss, {
     let iso = Iso::new();
-    commands::init("ns", &Some(iso.key_path())).unwrap();
-    let key = Some(iso.key_path());
+    commands::init(&iso.key_opt()).unwrap();
+    let key = iso.key_opt();
     let n = 16;
 
     let mut handles = Vec::new();
@@ -82,7 +87,7 @@ env_test!(concurrent_set_distinct_keys_no_loss, {
         let k = key.clone();
         handles.push(std::thread::spawn(move || {
             // Each thread adds its own unique key.
-            commands::set(&k, false, &format!("K{i}"), &format!("v{i}"))
+            commands::set(&k, &format!("K{i}"), &format!("v{i}"))
         }));
     }
     for h in handles {
@@ -90,7 +95,7 @@ env_test!(concurrent_set_distinct_keys_no_loss, {
     }
 
     // Reload and verify ALL n keys are present (no lost updates).
-    let v = vault::Vault::load("ns", &iso.key_path()).unwrap();
+    let v = vault::Vault::load(&iso.key_path()).unwrap();
     let mut names: Vec<String> = v.entries.iter().map(|(k, _)| k.clone()).collect();
     names.sort();
     assert_eq!(
@@ -115,10 +120,10 @@ env_test!(concurrent_set_distinct_keys_no_loss, {
 // =========================================================================
 env_test!(held_lock_blocks_second_loader, {
     let iso = Iso::new();
-    commands::init("ns", &Some(iso.key_path())).unwrap();
+    commands::init(&iso.key_opt()).unwrap();
 
     // Hold the lock for the whole test by keeping this Vault alive.
-    let _held = vault::Vault::load("ns", &iso.key_path()).unwrap();
+    let _held = vault::Vault::load(&iso.key_path()).unwrap();
     let key_path = iso.key_path();
 
     // Second loader in another thread.
@@ -127,7 +132,7 @@ env_test!(held_lock_blocks_second_loader, {
     let h = std::thread::spawn(move || {
         // This must block until `_held` is dropped. If the lock were a no-op,
         // this would complete almost instantly.
-        let _v = vault::Vault::load("ns", &key_path).unwrap();
+        let _v = vault::Vault::load(&key_path).unwrap();
         *loaded2.lock().unwrap() = true;
     });
 
@@ -152,13 +157,14 @@ env_test!(held_lock_blocks_second_loader, {
 });
 
 // =========================================================================
-// 3. TOCTOU ON INIT — many threads concurrently `init` the SAME namespace.
+// 3. TOCTOU ON INIT — many threads concurrently `init` the SAME project.
 //    Exactly one must win; the rest must error "already exists". Without the
 //    init lock, two could both pass the existence check and corrupt state.
 // =========================================================================
-env_test!(concurrent_init_same_namespace_one_winner, {
+env_test!(concurrent_init_same_project_one_winner, {
     let iso = Iso::new();
-    let key = Some(iso.key_path());
+    // init needs the public-key line from the .pub file; clone the key path.
+    let key = iso.key_opt();
     let n = 12;
 
     let results = Arc::new(Mutex::new(Vec::<bool>::new()));
@@ -167,7 +173,7 @@ env_test!(concurrent_init_same_namespace_one_winner, {
         let k = key.clone();
         let r = results.clone();
         handles.push(std::thread::spawn(move || {
-            let ok = commands::init("solo", &k).is_ok();
+            let ok = commands::init(&k).is_ok();
             r.lock().unwrap().push(ok);
         }));
     }
@@ -179,32 +185,26 @@ env_test!(concurrent_init_same_namespace_one_winner, {
         wins, 1,
         "exactly one init must win, got {wins} (TOCTOU race / init not locked)"
     );
-    // Namespace is usable.
-    assert!(vault::list_namespaces()
-        .unwrap()
-        .contains(&"solo".to_string()));
+    // Vault is usable.
+    assert!(vault::vault_path().unwrap().exists());
 });
 
 // =========================================================================
-// 4. SERIALIZED WRITES PRESERVE COUNT — many threads each set the SAME key
-//    would be nonsensical (set errors on existing), so instead each thread
-//    does set K{n}=v then a 2nd set of a unique key. We assert the final
-//    entry count equals the number of distinct keys written, proving every
-//    write committed on top of the latest state (no stale-overwrite).
+// 4. SERIALIZED WRITES PRESERVE COUNT — each thread writes one unique key.
+//    The final entry count equals N, proving every write committed on top of
+//    the latest state (no stale-overwrite).
 // =========================================================================
 env_test!(interleaved_writes_all_commit, {
     let iso = Iso::new();
-    commands::init("ns", &Some(iso.key_path())).unwrap();
-    let key = Some(iso.key_path());
+    commands::init(&iso.key_opt()).unwrap();
+    let key = iso.key_opt();
     let n = 10;
 
     let mut handles = Vec::new();
     for i in 0..n {
         let k = key.clone();
         handles.push(std::thread::spawn(move || {
-            // Sequentially: add own key, then a "shared-counter-style" key that
-            // reads-modifies-writes. The lock guarantees each sees the prior.
-            commands::set(&k, false, &format!("T{i}"), "1").unwrap();
+            commands::set(&k, &format!("T{i}"), "1").unwrap();
             // Small spin to increase interleaving odds.
             std::thread::yield_now();
         }));
@@ -212,57 +212,31 @@ env_test!(interleaved_writes_all_commit, {
     for h in handles {
         h.join().unwrap();
     }
-    let v = vault::Vault::load("ns", &iso.key_path()).unwrap();
+    let v = vault::Vault::load(&iso.key_path()).unwrap();
     assert_eq!(v.entries.len(), n, "expected {n} committed writes");
 });
 
 // =========================================================================
-// 5. LOCK IS PER-NAMESPACE — holding namespace A does NOT block namespace B.
-//    This guards against accidentally locking a global/shared file.
-// =========================================================================
-env_test!(lock_is_per_namespace, {
-    let iso = Iso::new();
-    commands::init("ns-a", &Some(iso.key_path())).unwrap();
-    commands::init("ns-b", &Some(iso.key_path())).unwrap();
-
-    // Hold ns-a's lock.
-    let _held_a = vault::Vault::load("ns-a", &iso.key_path()).unwrap();
-
-    // ns-b should be loadable + writable without delay.
-    let started = std::time::Instant::now();
-    {
-        let mut b = vault::Vault::load("ns-b", &iso.key_path()).unwrap();
-        b.set("X", "1").unwrap();
-        b.save().unwrap();
-    }
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "ns-b was blocked ({elapsed:?}) while only ns-a was locked — lock is not per-namespace"
-    );
-});
-
-// =========================================================================
-// 6. READ-WRITE CYCLE IS ATOMIC — two threads each read the count, add one
-//    distinct key, write back. With proper locking, final count == 2*N. This
-//    is the canonical lost-update test expressed directly.
+// 5. READ-WRITE CYCLE IS ATOMIC — N threads each do a full load→set→save
+//    through the vault layer, each adding one unique key. With proper
+//    locking, final count == 1 + N (seed + one per writer).
 // =========================================================================
 env_test!(read_modify_write_is_atomic, {
     let iso = Iso::new();
-    commands::init("ns", &Some(iso.key_path())).unwrap();
-    let key = Some(iso.key_path());
+    commands::init(&iso.key_opt()).unwrap();
+    let key = iso.key_path();
     let n = 8usize;
 
-    // Seed one key so both threads see a non-empty vault.
-    commands::set(&key, false, "seed", "0").unwrap();
+    // Seed one key so threads see a non-empty vault.
+    commands::set(&iso.key_opt(), "seed", "0").unwrap();
 
     let mut handles = Vec::new();
     for t in 0..n {
         let k = key.clone();
         handles.push(std::thread::spawn(move || {
-            // Full read-modify-write through the command layer (load→set→save),
+            // Full read-modify-write through the vault layer (load→set→save),
             // each adding one unique key. Lock must serialize the whole cycle.
-            let mut v = vault::Vault::load("ns", k.as_deref().unwrap()).unwrap();
+            let mut v = vault::Vault::load(&k).unwrap();
             v.set(&format!("w{t}"), "v").unwrap();
             v.save().unwrap();
         }));
@@ -271,7 +245,7 @@ env_test!(read_modify_write_is_atomic, {
         h.join().unwrap();
     }
 
-    let v = vault::Vault::load("ns", &iso.key_path()).unwrap();
+    let v = vault::Vault::load(&iso.key_path()).unwrap();
     // seed + n writer keys.
     assert_eq!(
         v.entries.len(),

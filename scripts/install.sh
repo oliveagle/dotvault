@@ -185,8 +185,8 @@ else
   info "       export PATH=\"$INSTALL_DIR:\$PATH\""
   info "  2. Run the environment setup:"
   info "       dotvault install"
-  info "  3. Bind a project to a namespace:"
-  info "       dotvault init myapp"
+  info "  3. In a project directory, create a vault:"
+  info "       cd your-project && dotvault init"
 fi
 info ""
 info "Done."

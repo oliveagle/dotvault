@@ -1,4 +1,4 @@
-//! dotvault — SSH-key encrypted, namespaced secret vault with `.env` export.
+//! dotvault — SSH-key encrypted, multi-recipient secret vault with `.env` export.
 
 use std::path::PathBuf;
 
@@ -11,21 +11,16 @@ use dotvault::commands;
 #[command(
     name = "dotvault",
     version,
-    about = "SSH-key encrypted, namespaced secret vault with .env export"
+    about = "SSH-key encrypted, multi-recipient secret vault with .env export"
 )]
 struct Cli {
-    /// Path to the SSH private key used for encryption.
+    /// Path to the SSH private key used to decrypt the vault.
     /// Default: ~/.ssh/id_ed25519. Env: DOTVAULT_KEY.
     ///
     /// Top-level option; must precede the subcommand, e.g.
     /// `dotvault --key ~/.ssh/id_ed25519 set A 1`.
     #[arg(long)]
     key: Option<PathBuf>,
-
-    /// Use the global namespace (~/.dotvault/access_key) instead of the
-    /// project's .dotvault_key. Also auto-selected when no project key exists.
-    #[arg(long)]
-    global: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -36,12 +31,10 @@ enum Command {
     /// One-shot environment setup: create global dirs + default config.
     /// Idempotent — never overwrites existing config.
     Install,
-    /// Create a namespace and bind this project to it (writes ./.dotvault_key).
-    Init {
-        /// Namespace name. Must match `[a-z0-9][a-z0-9-_]*`.
-        namespace: String,
-    },
-    /// Set (or overwrite) a secret in the current namespace.
+    /// Create a project vault (`.vault` + `.vault.keys`) in the current
+    /// directory, seeded with your public key.
+    Init,
+    /// Set (or overwrite) a secret in the project vault.
     Set {
         /// Secret name. Must match `[A-Za-z_][A-Za-z0-9_]*`.
         key: String,
@@ -52,21 +45,24 @@ enum Command {
     Get { key: String },
     /// Remove a secret.
     Rm { key: String },
-    /// List secret names in the current namespace, one per line.
+    /// List secret names in the project vault, one per line.
     List,
     /// Export all secrets as `KEY=VALUE` lines to stdout.
     Export,
-    /// Re-encrypt all namespaces with a different SSH key.
-    Rekey {
-        /// Path to the NEW SSH private key to adopt.
-        #[arg(long)]
-        new_key: PathBuf,
+    /// Authorize a teammate: add their SSH public key and re-encrypt so they
+    /// can decrypt. Accepts an authorized-keys line, a `*.pub` path, or `@file`.
+    AddKey {
+        /// Public key spec: `ssh-ed25519 AAAA...`, `~/.ssh/id_ed25519.pub`, or `@keys.txt`.
+        pubkey: String,
     },
-    /// Manage namespaces.
-    Ns {
-        #[command(subcommand)]
-        cmd: NsCmd,
+    /// Revoke a teammate's access: remove their key and re-encrypt. Note this
+    /// does NOT revoke access to ciphertext already committed to git history.
+    RemoveKey {
+        /// Fingerprint (`SHA256:...`) or label of the key to remove.
+        query: String,
     },
+    /// List the authorized recipients (fingerprints + labels).
+    ListKeys,
     /// Show or set global config (~/.dotvault/config.toml).
     Config {
         /// Set the default SSH key path.
@@ -79,18 +75,10 @@ enum Command {
         #[arg(long, value_name = "N")]
         set_backup_keep: Option<usize>,
     },
-    /// Verify the current namespace's vault integrity + access key.
+    /// Verify the project vault integrity + list authorized keys.
     Doctor,
     /// Print version + build details (git hash, build time, rustc, target).
     Version,
-}
-
-#[derive(Subcommand, Debug)]
-enum NsCmd {
-    /// List all namespaces.
-    List,
-    /// Remove a namespace (requires the SSH key to authorize).
-    Remove { namespace: String },
 }
 
 fn main() -> Result<()> {
@@ -106,23 +94,21 @@ fn main() -> Result<()> {
     }
     match cli.command {
         Command::Install => commands::install(&cli.key),
-        Command::Init { namespace } => commands::init(&namespace, &cli.key),
-        Command::Set { key, value } => commands::set(&cli.key, cli.global, &key, &value),
-        Command::Get { key } => commands::get(&cli.key, cli.global, &key),
-        Command::Rm { key } => commands::rm(&cli.key, cli.global, &key),
-        Command::List => commands::list(&cli.key, cli.global),
-        Command::Export => commands::export(&cli.key, cli.global),
-        Command::Rekey { new_key } => commands::rekey(&cli.key, &new_key),
-        Command::Ns { cmd } => match cmd {
-            NsCmd::List => commands::ns_list(),
-            NsCmd::Remove { namespace } => commands::ns_remove(&namespace, &cli.key),
-        },
+        Command::Init => commands::init(&cli.key),
+        Command::Set { key, value } => commands::set(&cli.key, &key, &value),
+        Command::Get { key } => commands::get(&cli.key, &key),
+        Command::Rm { key } => commands::rm(&cli.key, &key),
+        Command::List => commands::list(&cli.key),
+        Command::Export => commands::export(&cli.key),
+        Command::AddKey { pubkey } => commands::add_key(&cli.key, &pubkey),
+        Command::RemoveKey { query } => commands::remove_key(&cli.key, &query),
+        Command::ListKeys => commands::list_keys(&cli.key),
         Command::Config {
             set_key,
             set_backup_dir,
             set_backup_keep,
         } => commands::config(&set_key, &set_backup_dir, &set_backup_keep),
-        Command::Doctor => commands::doctor(&cli.key, cli.global),
+        Command::Doctor => commands::doctor(&cli.key),
         Command::Version => commands::version(),
     }
 }

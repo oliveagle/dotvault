@@ -1,35 +1,32 @@
 # dotvault
 
-SSH-key encrypted, **namespaced** secret vault that exports to `.env` format.
+SSH-key encrypted, **multi-recipient** secret vault that exports to `.env`
+format. Each project keeps its own encrypted `.vault` file **committed to
+git**, and every authorized teammate can decrypt it with their own SSH key.
 
-`dotvault` stores passwords, API tokens, and other secrets **centrally** under
-`~/.dotvault/namespaces/<ns>/`, encrypted with a key derived from your SSH
-private key. Each project binds to a **namespace** via a plaintext
-`.dotvault_key` file and reads its secrets as `KEY=VALUE` lines — ready to
-redirect into a `.env` file or pipe into `env`/`direnv`.
+`dotvault` stores passwords, API tokens, and other secrets in a project-local
+`.vault` file (an [age](https://age-encryption.org) container encrypted to the
+SSH public keys of every authorized recipient). The list of authorized keys
+lives in `.vault.keys` (JSON, also committed). Anyone on the team whose key is
+listed can decrypt; adding/removing a teammate is one command.
 
 ## How it works
 
 ```
-                          ┌──────────── centralized storage ────────────┐
-  project A/              │  ~/.dotvault/namespaces/                     │
-    .dotvault_key ───────►│    app-prod/  vault.bin   (SSH-key sealed)   │
-   (namespace +           │               .access_key.enc (SSH-key enc)  │
-    access_key,           │    app-stage/ vault.bin                      │
-    plaintext)            │    ci-tokens/ vault.bin                      │
-                          └─────────────────────────────────────────────┘
-       + SSH key ──► decrypts the namespace's vault.bin every operation
+  project/                    committed to git
+    .vault       ───────────► age container (encrypted to every authorized key)
+    .vault.keys  ───────────► { authorized public keys }   (auditable)
+
+  ~/.ssh/id_ed25519  ──► your private key decrypts .vault (one of N recipients)
 ```
 
-- **SSH key** — required every operation; it decrypts a namespace's vault. The
-  real secret-keeper.
-- **access_key** — a namespace selector + authorization token. Stored plaintext
-  in the project's `.dotvault_key` AND, encrypted by the SSH key, in the
-  namespace's `.access_key.enc` registry. On every operation dotvault verifies
-  the two match — so a project can't impersonate another namespace by editing
-  its file.
-- **Crypto:** AES-256-GCM. The whole `.env` document per namespace is one
-  authenticated ciphertext; any tamper or wrong-key decrypt fails.
+- **`.vault`** — the encrypted secrets. An age file encrypted to every public
+  key in `.vault.keys`. Any single authorized private key decrypts it.
+- **`.vault.keys`** — the authorized-public-key registry (human-readable JSON,
+  committed to git). Source of truth for who can decrypt. Add a teammate =
+  append their key + re-encrypt.
+- **No central secret store.** `~/.dotvault/` holds only config, backups, and
+  the update-check cache — no secrets.
 
 ## Install
 
@@ -56,40 +53,34 @@ for `dotvault-Darwin-arm64.tar.gz`, `dotvault-Linux-x86_64.tar.gz`,
 - An SSH private key in **OpenSSH** format (`BEGIN OPENSSH PRIVATE KEY`).
   Legacy `BEGIN RSA PRIVATE KEY` / `BEGIN EC PRIVATE KEY` must first be
   converted: `ssh-keygen -p -m PEM -f ~/.ssh/id_rsa`.
+- A matching `*.pub` file is convenient for `init` (otherwise the public key
+  is derived from the private key).
 
 ## Quick start
 
 ```sh
 dotvault install                 # one-time: create ~/.dotvault/ + config
-dotvault init myapp              # bind THIS project to namespace "myapp"
-                                 # → creates ~/.dotvault/namespaces/myapp/
-                                 # → writes ./.dotvault_key
 
-dotvault set DB_PASSWORD s3cret  # store a secret in namespace "myapp"
+cd my-project/
+dotvault init                    # create .vault + .vault.keys, seeded with YOUR key
+dotvault set DB_PASSWORD s3cret  # store a secret
 dotvault set API_TOKEN ghp_xyz
 
-dotvault list                    # secret names (global + project sections)
-dotvault export                  # KEY=VALUE from global + project, sectioned
-dotvault export > .env           # write a .env file (comments are ignored)
+dotvault list                    # secret names
+dotvault export                  # KEY=VALUE
+dotvault export > .env           # write a .env file (gitignored)
 dotvault get API_TOKEN           # value only, no trailing newline
 ```
 
-`export` and `list` merge the global namespace with the project's namespace,
-separated by `# === <ns> ===` comment headers (ignored by `.env` tools).
-Project keys override global ones on name collisions:
+### Sharing with a teammate
 
+```sh
+# You authorize Bob by his public key:
+dotvault add-key ~/.ssh/bob_id_ed25519.pub   # or an authorized-keys line, or @file
+
+# Bob commits the updated .vault + .vault.keys, pulls, and decrypts with HIS key:
+dotvault get DB_PASSWORD                      # works with Bob's ~/.ssh/id_ed25519
 ```
-# === global ===
-GITHUB_TOKEN=ghp_xxx
-# API_TOKEN  # overridden by project
-
-# === namespace: myapp ===
-DB_PASSWORD=s3cret
-API_TOKEN=ghp_project_specific
-```
-
-Overridden global keys appear as commented-out markers (`# KEY  # overridden`)
-in the global section — invisible to `.env` tools but visible when debugging.
 
 Capture a single secret in a shell:
 
@@ -107,17 +98,17 @@ eval "$(dotvault export | sed 's/^/export /')"
 
 ```
 dotvault install                       # bootstrap global dirs + config (idempotent)
-dotvault init <NAMESPACE>              # create namespace + bind project (.dotvault_key)
+dotvault init                          # create project .vault + .vault.keys (your key)
 dotvault set <KEY> <VALUE>             # add a secret (errors if KEY exists — rm first)
 dotvault get <KEY>                     # value to stdout, no trailing newline
 dotvault rm <KEY>                      # remove a secret (errors if absent)
-dotvault list                          # secret names, global + project sections
-dotvault export                        # KEY=VALUE from global + project, sectioned
-dotvault ns list                       # list all namespaces
-dotvault ns remove <NAMESPACE>         # delete a namespace (needs SSH key)
-dotvault rekey --new-key <PATH>        # re-encrypt ALL namespaces with a new SSH key
+dotvault list                          # secret names
+dotvault export                        # KEY=VALUE
+dotvault add-key <PUBKEY>              # authorize a teammate (pubkey line / *.pub / @file)
+dotvault remove-key <FP|LABEL>         # revoke a teammate (re-encrypts; see Security)
+dotvault list-keys                     # list authorized recipients (fingerprints + labels)
+dotvault doctor                        # verify vault + list authorized keys
 dotvault version                       # print version + git hash + build details
-dotvault doctor                        # verify current namespace integrity
 dotvault config [--set-key ...]        # show/set ~/.dotvault/config.toml
 ```
 
@@ -134,23 +125,25 @@ Top-level option (must precede the subcommand):
 --key <PATH>   SSH private key (default ~/.ssh/id_ed25519, env DOTVAULT_KEY)
 ```
 
-## Namespaces & access keys
+## Security model
 
-Each **namespace** is an isolated secret store. A project binds to one via a
-`.dotvault_key` file at its root:
-
-```text
-# ./.dotvault_key  (plaintext, two lines)
-myapp
-a3f0c1b2...64-hex-chars
-```
-
-- `dotvault init <ns>` creates the namespace and writes this file.
-- Multiple projects can share a namespace by copying the file between them.
-- Switch a project's namespace by running `dotvault init <other>` again (it
-  overwrites `.dotvault_key`) or by editing the file.
-- Namespace names match `[a-z0-9][a-z0-9-_]*` (strictly validated — this is the
-  path-traversal defense).
+- **Encryption:** the `.vault` file is an [age](https://age-encryption.org/v1)
+  container encrypted to every public key in `.vault.keys`. age uses an
+  ephemeral file key per encryption with one recipient stanza per key
+  (ChaCha20-Poly1305 AEAD). Supported key types: `ssh-ed25519`, `ssh-rsa`.
+- **Authorization = key possession.** If your SSH private key is listed in
+  `.vault.keys` (its public half), you can decrypt. No separate access token.
+- **Adding a user** (`add-key`): re-encrypts the vault to the new full key set.
+  Cheap — one new stanza, the whole payload re-sealed.
+- **Removing a user** (`remove-key`): re-encrypts to the remaining keys.
+  **Important:** this does NOT revoke access to ciphertext already committed to
+  git history. A revoked user who has an old checkout can still decrypt old
+  commits (the historical file key was wrapped to them). For a true revocation,
+  also **rotate the secret values** (e.g. `set` new passwords/tokens) so the
+  leaked-history ciphertext is worthless.
+- **Who can change `.vault.keys`?** Anyone with repository write access (the
+  key list is just a committed file). This is the same trust model as sops and
+  git-crypt: repository access controls who can add/remove recipients.
 
 ## Configuration
 
@@ -170,7 +163,7 @@ dotvault config --set-backup-keep 50         # enable rotation
 
 Resolution priority, highest first: `--flag` → env var → config file → default.
 Env overrides: `DOTVAULT_KEY`, `DOTVAULT_HOME`, `DOTVAULT_BACKUP_DIR`,
-`DOTVAULT_CONFIG`, `DOTVAULT_KEY_FILE`.
+`DOTVAULT_CONFIG`, `DOTVAULT_VAULT_DIR`.
 
 ## Fail-fast behavior (no implicit actions)
 
@@ -179,41 +172,54 @@ action is the backup**.
 
 | Situation                                  | Behavior                              |
 |--------------------------------------------|---------------------------------------|
-| `init <ns>` when namespace exists          | **error**                             |
+| `init` when a `.vault` already exists      | **error**                             |
 | `set KEY` where KEY already exists         | **error** — `rm` first to replace     |
 | `get`/`rm` a missing KEY                   | **error**                             |
-| `.dotvault_key` access_key ≠ registered    | **error** — authorization rejected    |
-| `.dotvault_key` names a non-existent ns    | **error**                             |
-| SSH key fingerprint ≠ namespace's key      | **error** — wrong key / use `rekey`    |
-| Decryption/GCM tag mismatch                | **error** — tampered or wrong key     |
-| namespace name with `/`, `..`, uppercase   | **error** — invalid name              |
+| `load` with a key not in `.vault.keys`     | **error** — decryption fails          |
+| `add-key` a duplicate key                  | **error** — already authorized        |
+| `remove-key` the last authorized key       | **error** — vault would be unrecoverable |
+| Decryption failure                         | **error** — tampered or unauthorized  |
 
 ## Concurrency
 
-Each namespace has an **exclusive lock** (an atomically-created `.lock` file)
-held for the entire read-modify-write cycle of a write command (`init`/`set`/
-`rm`/`rekey`). Concurrent processes writing the same namespace **serialize** —
-no lost updates. Locks are per-namespace (writing `app-a` never blocks
-`app-b`). If a lock can't be acquired within 30s (e.g. a crashed process left
-it stale), dotvault errors with the lock path so you can `rm` it.
+The project `.vault` has an **exclusive lock** (an atomically-created
+`.vault.lock` file, gitignored) held for the entire read-modify-write cycle of
+a write command (`init`/`set`/`rm`/`add-key`/`remove-key`). Concurrent
+processes writing the same project **serialize** — no lost updates. If a lock
+can't be acquired within 30s (e.g. a crashed process left it stale), dotvault
+errors with the lock path so you can `rm` it.
 
 ## File layout
 
 ```
-~/.dotvault/
-  config.toml                          # optional global config
-  backups/                             # timestamped, ns-prefixed encrypted backups
-    app-20260701-120000-a3f0c1.bin
-  namespaces/
-    <ns>/
-      vault.bin                        # DV1 container (AES-256-GCM sealed)
-      vault.meta.json                  # {version, ssh_fingerprint, kdf_salt, ...}
-      .access_key.enc                  # access_key, encrypted by the SSH key
-./.dotvault_key                        # project binding (plaintext namespace + key)
+project/
+  .vault                # age container, encrypted to all authorized keys (committed)
+  .vault.keys           # authorized-public-key registry, JSON (committed)
+  .vault.lock           # exclusive lock (gitignored, transient)
+
+~/.dotvault/            # global, no secrets
+  config.toml           # optional config
+  backups/              # timestamped, project-prefixed encrypted backups
+    myapp-20260701-120000-a3f0c1.bin
 ```
 
-Each successful write backs up the previous container before installing the new
+Each successful write backs up the previous `.vault` before installing the new
 one (atomic temp + rename).
+
+## Migrating from v0.3 (centralized namespaces)
+
+v0.4 is a **breaking change**: the centralized `~/.dotvault/namespaces/<ns>/`
+storage and the `.dotvault_key` binding file are gone, replaced by
+project-local `.vault` + `.vault.keys` using age multi-recipient encryption.
+The old AES-GCM/HKDF single-key format is incompatible and **not auto-migrated**.
+
+To migrate manually:
+
+1. In each project, run `dotvault init` (creates a fresh `.vault`).
+2. Re-add each secret: `dotvault set KEY VALUE` (read values from the old vault
+   with the v0.3 binary first, if needed).
+3. Authorize teammates: `dotvault add-key <their-pubkey>`.
+4. Commit `.vault` + `.vault.keys`.
 
 ## Development
 
@@ -230,7 +236,7 @@ Linux, and Windows; releases build on `v*` tags
 ### Releasing a new version
 
 ```sh
-./scripts/bump.sh patch    # 0.2.0 → 0.2.1 (also: minor, major)
+./scripts/bump.sh patch    # 0.4.0 → 0.4.1 (also: minor, major)
 ```
 
 This bumps `Cargo.toml`/`Cargo.lock`, runs `cargo check`, commits

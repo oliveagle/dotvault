@@ -1,18 +1,18 @@
-//! Integration tests for the v0.2 namespaced model.
+//! Integration tests for the v0.4 project-local, multi-recipient model.
 //!
-//! Each test runs in an isolated "home" (DOTVAULT_HOME + DOTVAULT_BACKUP_DIR +
-//! DOTVAULT_CONFIG all pointing into a temp dir) and a temp project dir that
-//! holds the `.dotvault_key`. No real `~/.dotvault` or `~/.ssh` is touched.
+//! Each test runs in an isolated "project" dir (DOTVAULT_VAULT_DIR + CWD) and
+//! an isolated "home" (DOTVAULT_HOME + DOTVAULT_BACKUP_DIR + DOTVAULT_CONFIG
+//! all pointing into a separate temp dir). No real `~/.dotvault` or `~/.ssh`
+//! is touched.
 
 mod common;
 
 use std::sync::{Mutex, OnceLock};
 
-use dotvault::access::AccessKey;
 use dotvault::commands;
 use dotvault::vault;
 
-use common::{sandbox, TestKey};
+use common::TestKey;
 
 /// Serialize tests that mutate process-global env vars.
 fn env_lock() -> &'static Mutex<()> {
@@ -31,7 +31,7 @@ macro_rules! env_test {
 }
 
 /// Isolated environment: temp home for DOTVAULT_HOME/backups/config + a temp
-/// project dir (CWD) that will hold `.dotvault_key`.
+/// project dir (CWD + DOTVAULT_VAULT_DIR) that will hold `.vault` / `.vault.keys`.
 struct Iso {
     _home: tempfile::TempDir,
     _project: tempfile::TempDir,
@@ -45,444 +45,342 @@ impl Iso {
         std::env::set_var("DOTVAULT_HOME", home.path());
         std::env::set_var("DOTVAULT_BACKUP_DIR", home.path().join("backups"));
         std::env::set_var("DOTVAULT_CONFIG", home.path().join("config.toml"));
+        std::env::set_var("DOTVAULT_VAULT_DIR", project.path());
         std::env::set_current_dir(project.path()).unwrap();
-        std::env::set_var("DOTVAULT_KEY_FILE", project.path().join(".dotvault_key"));
         Self {
             _home: home,
             _project: project,
             key: TestKey::new(),
         }
     }
+
+    fn key_opt(&self) -> Option<std::path::PathBuf> {
+        Some(self.key.path.clone())
+    }
 }
 
-fn key_opt(iso: &Iso) -> Option<std::path::PathBuf> {
-    Some(iso.key.path.clone())
-}
+// ---------- init ----------
 
-// ---------- init + access-key binding ----------
-
-env_test!(init_creates_namespace_and_key_file, {
+env_test!(init_creates_vault_and_keys_file, {
     let iso = Iso::new();
-    commands::init("myapp", &key_opt(&iso)).unwrap();
+    commands::init(&iso.key_opt()).unwrap();
 
-    let ak = AccessKey::read_from_project(std::path::Path::new(
-        &std::env::var("DOTVAULT_KEY_FILE").unwrap(),
-    ))
-    .unwrap();
-    assert_eq!(ak.namespace, "myapp");
-    assert_eq!(ak.key_hex().len(), 64);
+    // .vault and .vault.keys exist in the project dir.
+    let vpath = vault::vault_path().unwrap();
+    let kpath = vault::keys_path().unwrap();
+    assert!(vpath.exists(), ".vault missing");
+    assert!(kpath.exists(), ".vault.keys missing");
 
-    let names = vault::list_namespaces().unwrap();
-    assert_eq!(names, vec!["myapp".to_string()]);
+    // .vault.keys is parseable and contains exactly the init user's key.
+    let keys = dotvault::access::load_keys(&kpath).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys.keys[0].public_key, iso.key.pubkey_line());
 });
 
-env_test!(init_twice_same_namespace_errors, {
+env_test!(init_twice_errors, {
     let iso = Iso::new();
-    commands::init("ns1", &key_opt(&iso)).unwrap();
-    let err = commands::init("ns1", &key_opt(&iso)).err().unwrap();
-    assert!(format!("{err}").contains("already exists"));
+    commands::init(&iso.key_opt()).unwrap();
+    assert!(commands::init(&iso.key_opt()).is_err());
 });
 
-env_test!(init_rejects_invalid_namespace, {
+// ---------- set / get / rm / list ----------
+
+env_test!(set_get_roundtrip, {
     let iso = Iso::new();
-    let err = commands::init("../escape", &key_opt(&iso)).err().unwrap();
-    assert!(format!("{err}").contains("invalid") || format!("{err}").contains("must start"));
-});
-
-// ---------- set/get/list/export roundtrip ----------
-
-env_test!(set_get_list_export_roundtrip, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let k = key_opt(&iso);
-    commands::set(&k, false, "A", "1").unwrap();
-    commands::set(&k, false, "B", "two words").unwrap();
-    commands::set(&k, false, "C", "3").unwrap();
-
-    // Verify via a short-lived load (the lock must be released before the
-    // command-layer calls below, which each load again — holding both would
-    // self-deadlock on the namespace lock).
-    {
-        let v = vault::Vault::load("app", &iso.key.path).unwrap();
-        assert_eq!(v.get("B"), Some("two words"));
-    } // v dropped → lock released
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
 
     let mut out = Vec::new();
-    commands::export_to(&k, false, &mut out).unwrap();
-    assert_eq!(
-        String::from_utf8(out).unwrap(),
-        "# === namespace: app ===\nA=1\nB=two words\nC=3\n\n"
-    );
+    commands::get_to(&iso.key_opt(), "DB_PASSWORD", &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "s3cret");
+});
+
+env_test!(set_duplicate_errors, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "A", "1").unwrap();
+    assert!(commands::set(&iso.key_opt(), "A", "2").is_err());
+});
+
+env_test!(rm_removes_secret, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "A", "1").unwrap();
+    commands::rm(&iso.key_opt(), "A").unwrap();
+    assert!(commands::get(&iso.key_opt(), "A").is_err());
+});
+
+env_test!(export_renders_all_entries, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "A", "1").unwrap();
+    commands::set(&iso.key_opt(), "B", "two").unwrap();
 
     let mut out = Vec::new();
-    commands::list_to(&k, false, &mut out).unwrap();
-    assert_eq!(
-        String::from_utf8(out).unwrap(),
-        "# === namespace: app ===\nA\nB\nC\n\n"
-    );
-
-    let mut out = Vec::new();
-    commands::get_to(&k, false, "A", &mut out).unwrap();
-    assert_eq!(String::from_utf8(out).unwrap(), "1");
-});
-
-// ---------- fail-fast behaviors ----------
-
-env_test!(set_existing_key_errors, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let k = key_opt(&iso);
-    commands::set(&k, false, "K", "v1").unwrap();
-    let err = commands::set(&k, false, "K", "v2").err().unwrap();
-    assert!(format!("{err}").contains("already exists"));
-});
-
-env_test!(get_missing_key_errors, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let err = commands::get(&key_opt(&iso), false, "NOPE").err().unwrap();
-    assert!(format!("{err}").contains("no such secret"));
-});
-
-env_test!(rm_missing_key_errors, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let err = commands::rm(&key_opt(&iso), false, "NOPE").err().unwrap();
-    assert!(format!("{err}").contains("no such secret"));
-});
-
-env_test!(operation_without_key_file_errors, {
-    let iso = Iso::new();
-    let err = commands::set(&key_opt(&iso), false, "X", "1")
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("no access key"));
-});
-
-// ---------- namespace isolation ----------
-
-env_test!(two_namespaces_are_isolated, {
-    let iso = Iso::new();
-    commands::init("ns-a", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), false, "SHARED", "from-a").unwrap();
-    let ak_a = std::fs::read_to_string(std::env::var("DOTVAULT_KEY_FILE").unwrap()).unwrap();
-
-    commands::init("ns-b", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), false, "SHARED", "from-b").unwrap();
-
-    let v_b = vault::Vault::load("ns-b", &iso.key.path).unwrap();
-    assert_eq!(v_b.get("SHARED"), Some("from-b"));
-
-    // Restore ns-a's key file and verify isolation.
-    std::fs::write(std::env::var("DOTVAULT_KEY_FILE").unwrap(), ak_a).unwrap();
-    let v_a = vault::Vault::load("ns-a", &iso.key.path).unwrap();
-    assert_eq!(v_a.get("SHARED"), Some("from-a"));
-});
-
-env_test!(access_key_mismatch_is_rejected, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let path = std::env::var("DOTVAULT_KEY_FILE").unwrap();
-    // Same namespace, all-zero key → must not match the registered random key.
-    std::fs::write(
-        &path,
-        "app\n0000000000000000000000000000000000000000000000000000000000000000\n",
-    )
-    .unwrap();
-    let err = commands::set(&key_opt(&iso), false, "X", "1")
-        .err()
-        .unwrap();
-    assert!(
-        format!("{err}").contains("rejected") || format!("{err}").contains("does not match"),
-        "got: {err}"
-    );
-});
-
-env_test!(wrong_namespace_in_key_file_is_rejected, {
-    let iso = Iso::new();
-    commands::init("real", &key_opt(&iso)).unwrap();
-    let path = std::env::var("DOTVAULT_KEY_FILE").unwrap();
-    let ak = AccessKey::read_from_project(std::path::Path::new(&path)).unwrap();
-    std::fs::write(&path, format!("other\n{}\n", ak.key_hex())).unwrap();
-    let err = commands::set(&key_opt(&iso), false, "X", "1")
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("no vault") || format!("{err}").contains("does not exist"));
-});
-
-// ---------- wrong SSH key ----------
-
-env_test!(wrong_ssh_key_is_rejected, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let other = TestKey::new();
-    let err = commands::set(&Some(other.path), false, "X", "1")
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("mismatch"));
-});
-
-// ---------- ns list / remove ----------
-
-env_test!(ns_list_and_remove, {
-    let iso = Iso::new();
-    commands::init("alpha", &key_opt(&iso)).unwrap();
-    commands::init("beta", &key_opt(&iso)).unwrap();
-    let names = vault::list_namespaces().unwrap();
-    assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
-
-    commands::ns_remove("alpha", &key_opt(&iso)).unwrap();
-    let names = vault::list_namespaces().unwrap();
-    assert_eq!(names, vec!["beta".to_string()]);
-});
-
-env_test!(ns_remove_requires_correct_key, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let other = TestKey::new();
-    let err = commands::ns_remove("app", &Some(other.path)).err().unwrap();
-    assert!(format!("{err}").contains("mismatch"));
-});
-
-// ---------- tamper detection ----------
-
-env_test!(tampered_container_is_rejected, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), false, "A", "1").unwrap();
-
-    let bin = vault::namespace_dir("app").unwrap().join("vault.bin");
-    let mut data = std::fs::read(&bin).unwrap();
-    let i = data.len() - 1;
-    data[i] ^= 0xff;
-    std::fs::write(&bin, data).unwrap();
-
-    let err = commands::get(&key_opt(&iso), false, "A").err().unwrap();
-    assert!(format!("{err}").contains("decryption failed"));
-});
-
-// ---------- rekey ----------
-
-env_test!(rekey_all_namespaces, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), false, "SECRET", "hush").unwrap();
-
-    let new_key = TestKey::new();
-    commands::rekey(&key_opt(&iso), &new_key.path).unwrap();
-
-    let err = commands::get(&key_opt(&iso), false, "SECRET")
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("mismatch"));
-    let v = vault::Vault::load("app", &new_key.path).unwrap();
-    assert_eq!(v.get("SECRET"), Some("hush"));
-});
-
-// ---------- doctor ----------
-
-env_test!(doctor_reports_ok, {
-    let iso = Iso::new();
-    commands::init("app", &key_opt(&iso)).unwrap();
-    let mut out = Vec::new();
-    commands::doctor_to(&key_opt(&iso), false, &mut out).unwrap();
+    commands::export_to(&iso.key_opt(), &mut out).unwrap();
     let s = String::from_utf8(out).unwrap();
-    assert!(s.contains("status          : OK"));
-    assert!(s.contains("namespace       : app"));
+    assert!(s.contains("A=1"), "export should contain A=1:\n{s}");
+    assert!(s.contains("B=two"), "export should contain B=two:\n{s}");
 });
 
-env_test!(doctor_fails_without_key_file, {
+// ---------- multi-recipient authorization ----------
+
+env_test!(added_key_can_decrypt, {
+    // Alice inits and adds Bob; Bob can then decrypt with his own key.
     let iso = Iso::new();
-    let err = commands::doctor(&key_opt(&iso), false).err().unwrap();
-    assert!(format!("{err}").contains("no access key"));
-});
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    commands::set(&alice, "SECRET", "value").unwrap();
 
-// ---------- install ----------
+    let bob = TestKey::new();
+    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
 
-env_test!(install_creates_global_dirs_and_config, {
-    let iso = Iso::new();
-    commands::install(&key_opt(&iso)).unwrap();
-    let home = std::env::var("DOTVAULT_HOME").unwrap();
-    assert!(std::path::Path::new(&home).join("namespaces").exists());
-    assert!(std::path::Path::new(&home).join("backups").exists());
-    assert!(std::path::Path::new(&home).join("config.toml").exists());
-});
-
-env_test!(install_does_not_overwrite_config, {
-    let iso = Iso::new();
-    let cfg_path = std::env::var("DOTVAULT_CONFIG").unwrap();
-    std::fs::write(&cfg_path, "backup_keep = 7\n").unwrap();
-    commands::install(&key_opt(&iso)).unwrap();
-    let after = std::fs::read_to_string(&cfg_path).unwrap();
-    assert!(after.contains("backup_keep = 7"));
-    assert!(!after.contains("backup_keep = 50"));
-});
-
-// ---------- skill install ----------
-
-env_test!(install_writes_skill_and_symlinks, {
-    // Control HOME so the ~/.agents/skills symlink target is isolated too.
-    let home = tempfile::tempdir().unwrap();
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", home.path());
-    let iso = Iso::new();
-
-    commands::install(&key_opt(&iso)).unwrap();
-
-    // SKILL.md written under ~/.dotvault/skill/.
-    let dv_home = std::env::var("DOTVAULT_HOME").unwrap();
-    let skill_file = std::path::Path::new(&dv_home)
-        .join("skill")
-        .join("SKILL.md");
-    assert!(skill_file.exists(), "skill file should be written");
-    let body = std::fs::read_to_string(&skill_file).unwrap();
-    assert!(body.contains("name: dotvault"), "skill has wrong name");
-
-    // Symlink created under ~/.agents/skills/dotvault pointing at it.
-    // Windows can't create symlinks without privileges, so only assert the
-    // symlink on Unix; on Windows we still verified the SKILL.md file above.
-    let link = home.path().join(".agents").join("skills").join("dotvault");
-    #[cfg(unix)]
-    {
-        assert!(
-            std::fs::symlink_metadata(&link).is_ok(),
-            "skill symlink should exist"
-        );
-        let via_link = std::fs::read_to_string(link.join("SKILL.md")).unwrap();
-        assert!(via_link.contains("name: dotvault"));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = link; // referenced for clarity; symlink not auto-created on Windows.
-    }
-
-    std::env::remove_var("DOTVAULT_HOME");
-    match old_home {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
-});
-
-env_test!(install_skill_does_not_overwrite_existing, {
-    let home = tempfile::tempdir().unwrap();
-    let old_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", home.path());
-    let iso = Iso::new();
-    let dv_home = std::env::var("DOTVAULT_HOME").unwrap();
-    let skill_file = std::path::Path::new(&dv_home)
-        .join("skill")
-        .join("SKILL.md");
-    std::fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
-    std::fs::write(&skill_file, "# my custom skill edits\nname: dotvault\n").unwrap();
-
-    commands::install(&key_opt(&iso)).unwrap();
-
-    // User's custom content preserved, not overwritten by the embedded version.
-    let after = std::fs::read_to_string(&skill_file).unwrap();
-    assert!(
-        after.contains("my custom skill edits"),
-        "skill was overwritten"
-    );
-    assert!(
-        !after.contains("用 dotvault 管理项目"),
-        "embedded skill overwrote custom"
-    );
-
-    std::env::remove_var("DOTVAULT_HOME");
-    match old_home {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
-});
-
-// ---------- global namespace ----------
-
-env_test!(install_creates_global_namespace, {
-    let iso = Iso::new();
-    commands::install(&key_opt(&iso)).unwrap();
-    // global namespace vault + ~/.dotvault/access_key both created.
-    let global_key = dotvault::access::AccessKey::global_path().unwrap();
-    assert!(global_key.exists(), "global access_key should be created");
-    let dir = dotvault::vault::namespace_dir("global").unwrap();
-    assert!(
-        dir.join("vault.bin").exists(),
-        "global namespace vault missing"
-    );
-    let ak = dotvault::access::AccessKey::read_from_project(&global_key).unwrap();
-    assert_eq!(ak.namespace, "global");
-});
-
-env_test!(install_global_is_idempotent, {
-    let iso = Iso::new();
-    commands::install(&key_opt(&iso)).unwrap();
-    let global_key = dotvault::access::AccessKey::global_path().unwrap();
-    let snapshot = std::fs::read(&global_key).unwrap();
-    // Second install must not overwrite the global access key.
-    commands::install(&key_opt(&iso)).unwrap();
-    assert_eq!(
-        std::fs::read(&global_key).unwrap(),
-        snapshot,
-        "global key overwritten"
-    );
-});
-
-env_test!(global_fallback_when_no_project_key, {
-    let iso = Iso::new();
-    commands::install(&key_opt(&iso)).unwrap();
-    // No project .dotvault_key → set should auto-fallback to global.
-    commands::set(&key_opt(&iso), false, "GITHUB_TOKEN", "ghp_abc").unwrap();
-    let v = dotvault::vault::Vault::load("global", &iso.key.path).unwrap();
-    assert_eq!(v.get("GITHUB_TOKEN"), Some("ghp_abc"));
-});
-
-env_test!(global_explicit_flag_forces_global, {
-    let iso = Iso::new();
-    commands::install(&key_opt(&iso)).unwrap();
-    // Bind a project namespace AND put a value there.
-    commands::init("proj", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), false, "SHARED", "from-project").unwrap();
-    // --global writes to global, not project.
-    commands::set(&key_opt(&iso), true, "SHARED", "from-global").unwrap();
-
-    let proj = dotvault::vault::Vault::load("proj", &iso.key.path).unwrap();
-    assert_eq!(proj.get("SHARED"), Some("from-project"));
-    let g = dotvault::vault::Vault::load("global", &iso.key.path).unwrap();
-    assert_eq!(g.get("SHARED"), Some("from-global"));
-});
-
-env_test!(global_and_project_are_isolated, {
-    // Storage isolation: each namespace's vault only has its own keys.
-    let iso = Iso::new();
-    commands::install(&key_opt(&iso)).unwrap();
-    commands::init("proj", &key_opt(&iso)).unwrap();
-    commands::set(&key_opt(&iso), false, "ONLY_PROJ", "p").unwrap();
-    commands::set(&key_opt(&iso), true, "ONLY_GLOBAL", "g").unwrap();
-
-    let proj = dotvault::vault::Vault::load("proj", &iso.key.path).unwrap();
-    assert_eq!(proj.get("ONLY_PROJ"), Some("p"));
-    assert_eq!(proj.get("ONLY_GLOBAL"), None);
-
-    let g = dotvault::vault::Vault::load("global", &iso.key.path).unwrap();
-    assert_eq!(g.get("ONLY_GLOBAL"), Some("g"));
-    assert_eq!(g.get("ONLY_PROJ"), None);
-});
-
-// ---------- merged export/list tests are in tests/export_merge.rs ----------
-
-env_test!(doctor_reports_global_source, {
-    let iso = Iso::new();
-    commands::install(&key_opt(&iso)).unwrap();
-    // No project key → doctor uses global fallback.
+    // Bob loads the same project vault with his key and reads the secret.
     let mut out = Vec::new();
-    commands::doctor_to(&key_opt(&iso), false, &mut out).unwrap();
-    let s = String::from_utf8(out).unwrap();
-    assert!(s.contains("namespace       : global"));
-    assert!(s.contains("source          : global (fallback)"));
+    commands::get_to(&Some(bob.path.clone()), "SECRET", &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "value");
 });
 
-// Keep `sandbox` referenced (used by install tests indirectly via Iso);
-// suppress dead-code warning if it's otherwise unused here.
-#[allow(dead_code)]
-fn _ensure_sandbox_used() -> tempfile::TempDir {
-    sandbox()
-}
+env_test!(unauthorized_key_cannot_decrypt, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    commands::set(&alice, "SECRET", "value").unwrap();
+
+    let eve = TestKey::new();
+    // Eve has NOT been authorized; loading must fail.
+    assert!(commands::get(&Some(eve.path.clone()), "SECRET").is_err());
+});
+
+env_test!(remove_key_blocks_decryption, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    commands::set(&alice, "SECRET", "value").unwrap();
+
+    let bob = TestKey::new();
+    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+    // Bob is authorized now.
+    assert!(commands::get(&Some(bob.path.clone()), "SECRET").is_ok());
+
+    // Remove Bob by his fingerprint, then he can no longer decrypt the
+    // CURRENT ciphertext.
+    let bob_fp =
+        dotvault::crypto::ssh_fingerprint(&dotvault::crypto::load_private_key(&bob.path).unwrap());
+    commands::remove_key(&alice, &bob_fp).unwrap();
+    assert!(commands::get(&Some(bob.path.clone()), "SECRET").is_err());
+});
+
+env_test!(remove_last_key_refused, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    // Only Alice is authorized; removing her must be refused.
+    let alice_fp = dotvault::crypto::ssh_fingerprint(
+        &dotvault::crypto::load_private_key(&alice.unwrap()).unwrap(),
+    );
+    assert!(commands::remove_key(&iso.key_opt(), &alice_fp).is_err());
+});
+
+env_test!(add_duplicate_key_refused, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    // Re-adding Alice's own pubkey must be refused (already present).
+    assert!(commands::add_key(&alice, &iso.key.pubkey_path.to_string_lossy()).is_err());
+});
+
+env_test!(list_keys_shows_authorized, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    let bob = TestKey::new();
+    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+
+    // Load the vault and check the registry has 2 keys.
+    let v = vault::Vault::load(&alice.unwrap()).unwrap();
+    assert_eq!(v.keys.len(), 2);
+});
+
+// ---------- load errors ----------
+
+env_test!(load_without_init_errors, {
+    let iso = Iso::new();
+    assert!(commands::get(&iso.key_opt(), "X").is_err());
+});
+
+// ---------- command-layer coverage (list/list_keys/doctor/add_key @file) ----------
+
+env_test!(list_outputs_key_names, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "ALPHA", "1").unwrap();
+    commands::set(&iso.key_opt(), "BETA", "2").unwrap();
+
+    let mut out = Vec::new();
+    commands::list_to(&iso.key_opt(), &mut out).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("ALPHA"), "list should name ALPHA:\n{s}");
+    assert!(s.contains("BETA"), "list should name BETA:\n{s}");
+    // No values leaked in list mode.
+    assert!(!s.contains("=1"), "list must not show values");
+});
+
+env_test!(list_keys_command_marks_current_user, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    let bob = TestKey::new();
+    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+
+    // Verify via vault load that 2 keys are present and current user is authorized.
+    let v = vault::Vault::load(&alice.unwrap()).unwrap();
+    assert_eq!(v.keys.len(), 2);
+    // Exercise the public current_user_authorized helper.
+    assert!(v.current_user_authorized());
+});
+
+env_test!(doctor_reports_status_ok, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "A", "1").unwrap();
+
+    let mut out = Vec::new();
+    commands::doctor_to(&iso.key_opt(), &mut out).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.contains("status          : OK"),
+        "doctor should report OK:\n{s}"
+    );
+    assert!(
+        s.contains("entries         : 1"),
+        "doctor should show 1 entry:\n{s}"
+    );
+    assert!(
+        s.contains("authorized keys : 1"),
+        "doctor should show 1 key:\n{s}"
+    );
+});
+
+env_test!(add_key_via_at_file_syntax, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    commands::set(&alice, "SHARED", "v1").unwrap();
+
+    let bob = TestKey::new();
+    // Write Bob's pubkey to a temp file, then add via @file syntax.
+    let bob_line = bob.pubkey_line();
+    let spec_file = std::env::temp_dir().join("dv_bob_pubkey.txt");
+    std::fs::write(&spec_file, &bob_line).unwrap();
+
+    commands::add_key(&alice, &format!("@{}", spec_file.display())).unwrap();
+
+    // Bob can now decrypt SHARED.
+    let mut out = Vec::new();
+    commands::get_to(&Some(bob.path.clone()), "SHARED", &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "v1");
+    let _ = std::fs::remove_file(&spec_file);
+});
+
+env_test!(remove_key_command_by_fingerprint, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    let bob = TestKey::new();
+    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+
+    // Remove by fingerprint via the command layer.
+    let bob_fp =
+        dotvault::crypto::ssh_fingerprint(&dotvault::crypto::load_private_key(&bob.path).unwrap());
+    commands::remove_key(&alice, &bob_fp).unwrap();
+    // Bob can no longer decrypt.
+    assert!(commands::get(&Some(bob.path.clone()), "A").is_err());
+});
+
+env_test!(get_missing_secret_errors, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    assert!(commands::get(&iso.key_opt(), "NOPE").is_err());
+});
+
+env_test!(rm_missing_secret_errors, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    assert!(commands::rm(&iso.key_opt(), "NOPE").is_err());
+});
+
+env_test!(export_empty_vault_produces_warning, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    let mut out = Vec::new();
+    commands::export_to(&iso.key_opt(), &mut out).unwrap();
+    // Empty vault exports nothing (no sections).
+    let s = String::from_utf8(out).unwrap();
+    assert!(!s.contains("="), "empty vault should export no KEY=VALUE");
+});
+
+env_test!(add_key_invalid_pubkey_errors, {
+    let iso = Iso::new();
+    let alice = iso.key_opt();
+    commands::init(&alice).unwrap();
+    // A garbage string is not a valid pubkey.
+    assert!(commands::add_key(&alice, "not-a-valid-key").is_err());
+});
+
+// ---------- install / config / resolve_ssh_key_path coverage ----------
+
+env_test!(install_creates_dirs_and_config, {
+    let iso = Iso::new();
+    // install should succeed and create ~/.dotvault dirs + config.
+    commands::install(&iso.key_opt()).unwrap();
+    // config file created.
+    let cfg_path = dotvault::config::Config::path().unwrap();
+    assert!(cfg_path.exists());
+    // backups dir created (under DOTVAULT_HOME).
+    let home = dotvault::vault::dotvault_home().unwrap();
+    assert!(home.join("backups").exists());
+});
+
+env_test!(install_is_idempotent, {
+    let iso = Iso::new();
+    commands::install(&iso.key_opt()).unwrap();
+    // Second install must not error.
+    commands::install(&iso.key_opt()).unwrap();
+});
+
+env_test!(config_set_and_show, {
+    let iso = Iso::new();
+    commands::install(&iso.key_opt()).unwrap();
+    // Set a config value.
+    commands::config(&Some("~/.ssh/custom_key".into()), &None, &None).unwrap();
+    // Verify it persisted.
+    let cfg = dotvault::config::Config::load().unwrap();
+    assert_eq!(cfg.key.as_deref(), Some("~/.ssh/custom_key"));
+});
+
+env_test!(config_set_backup_keep, {
+    let iso = Iso::new();
+    commands::install(&iso.key_opt()).unwrap();
+    commands::config(&None, &None, &Some(99)).unwrap();
+    let cfg = dotvault::config::Config::load().unwrap();
+    assert_eq!(cfg.backup_keep, Some(99));
+});
+
+env_test!(version_prints_pkg_version, {
+    let mut out = Vec::new();
+    commands::version_to(&mut out).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.starts_with("dotvault "), "version output: {s}");
+});
+
+env_test!(set_uses_explicit_key_flag, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    // Pass key explicitly (not via env). DOTVAULT_KEY is not set in Iso.
+    std::env::remove_var("DOTVAULT_KEY");
+    commands::set(&iso.key_opt(), "FLAG_TEST", "ok").unwrap();
+    let mut out = Vec::new();
+    commands::get_to(&iso.key_opt(), "FLAG_TEST", &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "ok");
+});

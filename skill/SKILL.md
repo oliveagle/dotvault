@@ -1,19 +1,25 @@
 ---
 name: dotvault
-description: "用 dotvault 管理项目的加密密钥/API key/token,并以 .env 格式导出。SSH key 加密,按 namespace 隔离各应用。触发: store a secret, API key, generate .env, manage secrets, 密钥, 加密存储, 环境变量"
+description: "用 dotvault 管理项目的加密密钥/API key/token,并以 .env 格式导出。age 多接收方加密,每个团队成员用自己的 SSH 私钥解密。触发: store a secret, API key, generate .env, manage secrets, 密钥, 加密存储, 环境变量, add-key, 授权队友"
 ---
 
 # dotvault skill
 
-用 dotvault 给项目存取密钥(API key、token、password),并以 `.env` 兼容格式导出。
-所有密钥用用户的 SSH 私钥加密,按 namespace 隔离不同应用。
+用 dotvault 给项目存取密钥(API key、token、password),并以 `.env` 兼容格式
+导出。密钥存在项目根的 `.vault` 文件里([age](https://age-encryption.org) 加密),
+提交进 git;团队每个成员用自己的 SSH 私钥解密。
 
 ## 核心原则
 
-- **先确认环境**:运行 `dotvault version` 确认已安装(若有新版会在 stderr 提示);若项目根没有 `.dotvault_key`,先 `dotvault init <namespace>`。
-- **SSH key 是必须的**:每次操作都要 `--key`(默认 `~/.ssh/id_ed25519`,或设 `DOTVAULT_KEY` 环境变量,或 `dotvault config --set-key`)。
-- **fail-fast,不擅自做主**:`set` 已存在的 key 会报错(先 `rm`);`get`/`rm` 不存在的 key 会报错。绝不静默覆盖。
-- **明文输出走 stdout**:命令提示信息走 stderr,`export`/`get` 的密文走 stdout,可直接重定向。
+- **先确认环境**:运行 `dotvault version` 确认已安装;若项目根没有 `.vault`,
+  先 `dotvault init`。
+- **SSH key 是必须的**:每次操作都要 `--key`(默认 `~/.ssh/id_ed25519`,或设
+  `DOTVAULT_KEY` 环境变量,或 `dotvault config --set-key`)。能解密 = 你的公钥
+  在 `.vault.keys` 里。
+- **fail-fast,不擅自做主**:`set` 已存在的 key 会报错(先 `rm`);`get`/`rm`
+  不存在的 key 会报错。绝不静默覆盖。
+- **明文输出走 stdout**:命令提示走 stderr,`export`/`get` 的密文走 stdout,
+  可直接重定向。
 
 ## 命令速查
 
@@ -21,8 +27,8 @@ description: "用 dotvault 管理项目的加密密钥/API key/token,并以 .env
 # 一次性环境引导(创建 ~/.dotvault/ + 默认配置;幂等,不覆盖已有配置)
 dotvault install
 
-# 绑定项目到 namespace(在项目根目录跑,会写 ./.dotvault_key)
-dotvault --key ~/.ssh/id_ed25519 init <namespace>
+# 在项目根创建 .vault + .vault.keys(用你自己的公钥作为初始接收方)
+dotvault --key ~/.ssh/id_ed25519 init
 
 # 存密钥(key 名必须匹配 [A-Za-z_][A-Za-z0-9_]*)
 dotvault --key ~/.ssh/id_ed25519 set <NAME> <value>
@@ -30,83 +36,64 @@ dotvault --key ~/.ssh/id_ed25519 set <NAME> <value>
 # 取单个值(无尾换行,适合 $(...) 捕获)
 dotvault --key ~/.ssh/id_ed25519 get <NAME>
 
-# 列出当前 namespace 的 key 名
+# 列出 key 名 / 导出全部为 KEY=VALUE
 dotvault --key ~/.ssh/id_ed25519 list
-
-# 导出全部为 KEY=VALUE (.env 格式)
 dotvault --key ~/.ssh/id_ed25519 export
 dotvault --key ~/.ssh/id_ed25519 export > .env
 
 # 删除(不存在则报错)
 dotvault --key ~/.ssh/id_ed25519 rm <NAME>
 
-# 管理 namespace
-dotvault --key ~/.ssh/id_ed25519 ns list
-dotvault --key ~/.ssh/id_ed25519 ns remove <namespace>
+# 授权队友(公钥行 / *.pub 文件 / @文件)
+dotvault --key ~/.ssh/id_ed25519 add-key ~/.ssh/bob_id_ed25519.pub
 
-# 体检 / 换 SSH key / 看版本
+# 吊销队友(按指纹 SHA256:... 或 label)
+dotvault --key ~/.ssh/id_ed25519 remove-key <FINGERPRINT|LABEL>
+
+# 列出已授权的接收方
+dotvault --key ~/.ssh/id_ed25519 list-keys
+
+# 体检 / 看版本
 dotvault --key ~/.ssh/id_ed25519 doctor
-dotvault --key ~/.ssh/id_ed25519 rekey --new-key <PATH>
 dotvault version                       # 输出版本+git hash;若新版可用,stderr 提示一行
 ```
 
-省略 `--key` 的方式:`export DOTVAULT_KEY=~/.ssh/id_ed25519`,或 `dotvault config --set-key <path>`。
+省略 `--key` 的方式:`export DOTVAULT_KEY=~/.ssh/id_ed25519`,或
+`dotvault config --set-key <path>`。
 
-## 升级
+## 团队协作(多接收方)
 
-`dotvault version` 会在 stderr 提示是否有新版(在线检查,缓存 1 小时)。升级用单独的脚本(不是子命令,因为二进制不能在运行时替换自己):
-
-```sh
-scripts/upgrade.sh          # 幂等:已最新就退出 0,否则下载 + sha256 校验 + 替换二进制
-# 或重新跑安装脚本(效果一样):
-curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/scripts/install.sh | bash
-```
-
-## export / list 合并 global + project
-
-`export` 和 `list` 会**合并 global 和 project 两个 namespace**,用 `# === <ns> ===` 注释行分区(project 在后,覆盖 global 的同名 key)。输出符合 .env 语法(`#` 开头的行被 dotenv 工具忽略):
-
-```
-# === global ===
-GITHUB_TOKEN=ghp_xxx
-# === namespace: myapp ===
-DB_PASSWORD=s3cret
-```
-
-- 同名 key:project 的赢(global 区不显示被覆盖的)。
-- 加 `--global`:只导出 global(不合并)。
-- 无项目 `.dotvault_key`:只导出 global。
-
-## global namespace(跨项目共享的密钥)
-
-`install` 会自动创建一个名为 `global` 的特殊 namespace,access_key 存在 `~/.dotvault/access_key`。适合放跨项目通用的密钥(GITHUB_TOKEN、个人的 SSH passphrase 等)。
+`.vault` 是 age 多接收方加密文件:加密到 `.vault.keys` 里**每一个**公钥,任一
+授权私钥都能解密。加/减队友 = 改清单 + 重新加密。
 
 ```sh
-# 存到 global(显式 --global)
-dotvault --global set GITHUB_TOKEN ghp_xxx
+# Alice 创建项目 vault 并加 secret
+dotvault init
+dotvault set DB_PASSWORD s3cret
 
-# 项目没有 .dotvault_key 时,set/get/export 自动 fallback 到 global
-dotvault set PERSONAL_API_KEY xxx     # 无 .dotvault_key → 写进 global
+# Alice 授权 Bob(用他的公钥)
+dotvault add-key ~/.ssh/bob_id_ed25519.pub
 
-# 从 global 导出
-dotvault --global export
-dotvault --global get GITHUB_TOKEN
-
-# 强制用 global(即使项目已绑定)
-dotvault --global list
+# Bob 拉取后(更新后的 .vault + .vault.keys 已 commit),用自己的 key 解密
+dotvault get DB_PASSWORD                # OK
 ```
 
-优先级:`--global` 显式指定 > 项目 `.dotvault_key` > (无 key 文件时)自动 fallback 到 global。
+**吊销的局限(重要)**:`remove-key` 只重新加密**当前** `.vault`。已提交进 git
+历史的旧密文仍可被吊销者解密(旧 file key 曾包装给他)。真要吊销,必须同时
+**轮换 secret 值**(`set` 新的密码/token),让历史密文失效。
+
+谁能改 `.vault.keys`?有仓库写权限的人(它只是个提交进 git 的文件)。和 sops /
+git-crypt 同一信任模型。
 
 ## 典型工作流
 
 ### 场景 1:项目首次配置密钥
 ```sh
-dotvault --key ~/.ssh/id_ed25519 init myapp          # 建 namespace + 写 .dotvault_key
-dotvault set DATABASE_URL "postgres://..."            # 存
+dotvault --key ~/.ssh/id_ed25519 init                  # 建 .vault + .vault.keys
+dotvault set DATABASE_URL "postgres://..."             # 存
 dotvault set API_TOKEN "ghp_xxx"
 dotvault set STRIPE_KEY "sk_live_xxx"
-dotvault export > .env                                # 生成 .env
+dotvault export > .env                                 # 生成 .env
 ```
 
 ### 场景 2:运行时注入密钥(不落盘)
@@ -118,31 +105,47 @@ eval "$(dotvault export | sed 's/^/export /')"
 TOKEN=$(dotvault get API_TOKEN)
 ```
 
-### 场景 3:多项目共享 / 切换 namespace
-- 多个项目共享一个 namespace:复制 `.dotvault_key` 文件即可。
-- 切换当前项目的 namespace:重新 `dotvault init <other>`(覆盖 `.dotvault_key`),或手改文件第一行。
+### 场景 3:新人加入 / 离开
+```sh
+# 加入:管理员 add-key 后提交,新人 pull 即可解密
+dotvault add-key ~/.ssh/newguy.pub
+git add .vault .vault.keys && git commit -m "vault: add newguy"
+
+# 离开:remove-key + 轮换 secret
+dotvault remove-key SHA256:xxx
+dotvault set DB_PASSWORD <新的密码>    # 轮换,让历史密文失效
+```
 
 ## 模型与安全
 
-- **SSH key 每次都要**:它解密 namespace 下的 vault.bin。真正的密钥持有者。
-- **access_key**:存在项目的 `.dotvault_key`(明文,namespace 名 + 随机 key),用来选择并授权 namespace。每次操作会校验它和注册表里 SSH-key 加密的那份一致 —— 防止改文件冒充别的 namespace。
-- **namespace 名**:`[a-z0-9][a-z0-9-_]*`,严格校验防路径穿越。
-- **存储**:`~/.dotvault/namespaces/<ns>/vault.bin`(AES-256-GCM 密封)+ `.access_key.enc`。
-- **并发**:每个 namespace 有独占锁,多进程同时写不会丢更新。
+- **`.vault`**:age 加密文件(ChaCha20-Poly1305 AEAD),加密到 `.vault.keys`
+  全部公钥。每个接收方一条 stanza(密钥槽)。
+- **`.vault.keys`**:人类可读 JSON,列出授权公钥 + 指纹 + label。提交进 git,
+  可审计。
+- **授权 = 持有对应私钥**:你的公钥在清单里 → 你能解密。无单独 access token。
+- **存储位置**:密钥只在项目的 `.vault` / `.vault.keys`,**提交进 git**。
+  `~/.dotvault/` 只有 config / backups / 更新缓存,**无任何 secret**。
+- **并发**:项目 `.vault` 有独占锁(`.vault.lock`,gitignored),多进程同时写
+  不会丢更新。
+- **不自动迁移**:v0.3 的集中式 namespace 格式不兼容,需手动 `init` + 重新 `set`。
 
 ## 常见错误处理
 
 | 错误 | 原因 / 解决 |
 |------|------------|
-| `no access key at .dotvault_key` | 项目还没 `init <ns>`,先绑定 namespace |
+| `no vault at .vault` | 项目还没 `init`,先创建 |
 | `secret "X" already exists` | 已存在,先 `rm X` 再 `set` |
-| `fingerprint mismatch` | SSH key 不对;换对的 key,或 `rekey` |
-| `access key rejected` | `.dotvault_key` 被改坏/从别处拷错;重新 `init` 或恢复正确文件 |
-| `timed out waiting for lock` | 别的进程卡住了;`rm ~/.dotvault/namespaces/<ns>/.lock` |
+| `decryption failed: no matching key` | 你的私钥不在 `.vault.keys` 里;找管理员 `add-key` 你的公钥 |
+| `key ... is already authorized` | add-key 重复;该公钥已在清单 |
+| `cannot remove the last authorized key` | 至少保留一个接收方,否则 vault 无法恢复 |
+| `timed out waiting for lock` | 别的进程卡住了;`rm ./.vault.lock` |
 | legacy PEM format | `ssh-keygen -p -m PEM -f <key>` 转成 OpenSSH 格式 |
 
 ## 重要约束
 
-- 不要把 `.dotvault_key` 提交到 git(它在 `.gitignore` 里)。
-- `set` 不自动覆盖 —— 这是有意的 fail-fast 设计,助手不应绕过(不要帮用户自动 `rm`+`set`,先问用户)。
+- `.vault` 和 `.vault.keys` **要提交进 git**(团队共享)。只有 `.vault.lock`
+  在 `.gitignore` 里。
+- `set` 不自动覆盖 —— 这是有意的 fail-fast 设计,助手不应绕过(不要帮用户自动
+  `rm`+`set`,先问用户)。
+- `remove-key` 后务必提醒用户轮换 secret,否则历史密文仍可被吊销者解密。
 - 路径含 `~` 的,助手展开成绝对路径再传给命令更稳妥。

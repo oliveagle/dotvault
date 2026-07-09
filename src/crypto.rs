@@ -1,42 +1,88 @@
 //! Cryptographic primitives for dotvault.
 //!
-//! Design summary (see plan):
-//! - The AES-256 key is derived from the SSH private key's raw material via
-//!   HKDF-SHA256, keyed by a per-vault random salt. This is type-agnostic: any
-//!   SSH key type (ed25519, RSA, ECDSA) yields canonical private bytes.
-//! - The vault is sealed with AES-256-GCM (96-bit nonce, 128-bit tag) over the
-//!   whole `.env` plaintext. GCM authenticates the entire document, so tamper
-//!   or wrong-key decrypts fail with an `AeadError`.
+//! Design summary (v0.4, multi-recipient):
+//! - The `.vault` file is an **age** container encrypted to the SSH public
+//!   keys of every authorized recipient. age generates a random file key per
+//!   encryption and writes one recipient stanza (key slot) per public key.
+//! - Decryption tries the supplied SSH private key (`age::ssh::Identity`)
+//!   against the stanzas; any single matching key unwraps the file key.
+//! - SSH keys are parsed by the `ssh-key` crate. Passphrase-protected keys
+//!   are prompted for interactively via `rpassword`.
+//!
+//! The authorized public-key list itself lives in `.vault.keys` (JSON) and is
+//! the source of truth for who can decrypt — age stanzas only carry short key
+//! IDs, insufficient for audit. See `access::VaultKeys`.
 
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
-};
+use std::io::{Read, Write};
+use std::path::Path;
+
+use age::{Decryptor, Encryptor};
 use anyhow::{anyhow, bail, Context, Result};
-use hkdf::Hkdf;
-use rand::RngCore;
-use sha2::Sha256;
-use ssh_key::{HashAlg, PrivateKey};
+use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey};
 
-/// Magic header + version for the on-disk container: `DV1` + version byte.
-pub const MAGIC: &[u8; 3] = b"DV1";
-pub const VERSION: u8 = 1;
-/// HKDF info string binds the derived key to this application/format version.
-const HKDF_INFO: &[u8] = b"dotvault/v1";
-/// AES-256 key length in bytes.
-const KEY_LEN: usize = 32;
-/// GCM nonce length in bytes (96 bits).
-const NONCE_LEN: usize = 12;
-/// GCM authentication tag length in bytes (128 bits).
-const TAG_LEN: usize = 16;
-/// Length of the KDF salt in bytes.
-pub const SALT_LEN: usize = 32;
+/// Encrypt `plaintext` to ALL of the given SSH public keys (one OpenSSH
+/// authorized-keys line each, e.g. `ssh-ed25519 AAAA... comment`). Any one of
+/// the corresponding private keys will be able to decrypt the result.
+///
+/// Returns a binary age file (per the age v1 spec). Commits cleanly to git.
+pub fn encrypt_to_recipients(pubkey_lines: &[String], plaintext: &[u8]) -> Result<Vec<u8>> {
+    if pubkey_lines.is_empty() {
+        bail!("cannot encrypt: no recipients (the vault would be unrecoverable)");
+    }
+    let recipients: Vec<age::ssh::Recipient> = pubkey_lines
+        .iter()
+        .map(|line| {
+            line.parse::<age::ssh::Recipient>()
+                .map_err(|e| anyhow!("invalid SSH public key {:?}: {e:?}", line))
+        })
+        .collect::<Result<_>>()?;
+    let encryptor = Encryptor::with_recipients(recipients.iter().map(|r| r as &dyn age::Recipient))
+        .map_err(|e| anyhow!("age encryptor setup failed: {e}"))?;
+    let mut out = Vec::new();
+    let mut writer = encryptor
+        .wrap_output(&mut out)
+        .map_err(|e| anyhow!("age wrap_output failed: {e}"))?;
+    writer
+        .write_all(plaintext)
+        .map_err(|e| anyhow!("age write failed: {e}"))?;
+    writer
+        .finish()
+        .map_err(|e| anyhow!("age finish failed: {e}"))?;
+    Ok(out)
+}
 
-/// Container header length: magic(3) + version(1) + nonce(12).
-const HEADER_LEN: usize = 3 + 1 + NONCE_LEN;
+/// Decrypt an age container using the SSH private key at `privkey_path`.
+///
+/// Loads the private key (prompting for a passphrase if encrypted), exports
+/// it to OpenSSH text, and feeds it to age as an `ssh::Identity`. Returns the
+/// plaintext on success.
+pub fn decrypt_with_identity(privkey_path: &Path, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let private_key = load_private_key(privkey_path)?;
+    decrypt_with_key(&private_key, ciphertext)
+}
 
-/// A 32-byte AES-256 key derived from an SSH private key.
-pub struct AesKey(pub [u8; KEY_LEN]);
+/// Decrypt an age container using an already-loaded SSH private key.
+pub fn decrypt_with_key(private_key: &PrivateKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let openssh_text = private_key
+        .to_openssh(LineEnding::LF)
+        .map_err(|e| anyhow!("failed to encode SSH key to OpenSSH: {e}"))?;
+    let cursor = std::io::Cursor::new(ciphertext.to_vec());
+    let decryptor =
+        Decryptor::new_buffered(cursor).map_err(|e| anyhow!("not an age container: {e}"))?;
+    let identity = age::ssh::Identity::from_buffer(
+        std::io::Cursor::new(openssh_text.as_bytes().to_vec()),
+        Some(privkey_label(private_key)),
+    )
+    .map_err(|e| anyhow!("failed to parse SSH key for age: {e}"))?;
+    let mut reader = decryptor
+        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+        .map_err(|e| anyhow!("decryption failed: no matching key (or corrupted vault): {e}"))?;
+    let mut out = Vec::new();
+    reader
+        .read_to_end(&mut out)
+        .map_err(|e| anyhow!("age read failed: {e}"))?;
+    Ok(out)
+}
 
 /// Load and (if necessary) decrypt an OpenSSH private key.
 ///
@@ -45,7 +91,7 @@ pub struct AesKey(pub [u8; KEY_LEN]);
 /// private key format (`BEGIN OPENSSH PRIVATE KEY`) is supported — legacy
 /// `BEGIN RSA PRIVATE KEY` / `BEGIN EC PRIVATE KEY` (PEM/PKCS#1/PKCS#8) must
 /// first be converted with `ssh-keygen -p -m PEM -f <key>`.
-pub fn load_private_key(path: &std::path::Path) -> Result<PrivateKey> {
+pub fn load_private_key(path: &Path) -> Result<PrivateKey> {
     let pem = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read SSH key at {}", path.display()))?;
 
@@ -86,147 +132,83 @@ pub fn load_private_key(path: &std::path::Path) -> Result<PrivateKey> {
 }
 
 /// SHA-256 fingerprint of a key, in OpenSSH `SHA256:base64` form. Used to
-/// detect that the *same* key is being used across vault operations.
+/// identify recipients in `.vault.keys` and diagnostics.
 pub fn ssh_fingerprint(key: &PrivateKey) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }
 
-/// Extract canonical private-key material, by key type.
-///
-/// - ed25519: the 32-byte seed.
-/// - RSA: the private exponent `d` bytes.
-/// - Other types fall back to the OpenSSH-encoded private key blob, which is
-///   still a stable function of the key.
-fn private_material(key: &PrivateKey) -> Vec<u8> {
-    use ssh_key::private::KeypairData;
-    match key.key_data() {
-        KeypairData::Ed25519(ed) => ed.private.as_ref().to_vec(),
-        KeypairData::Rsa(rsa) => rsa.private.d.as_bytes().to_vec(),
-        // Stable fallback: re-encode the key material deterministically.
-        other => other
-            .algorithm()
-            .map(|a| a.as_str().as_bytes().to_vec())
-            .unwrap_or_default(),
-    }
+/// Fingerprint of a public key (same format as `ssh_fingerprint` for a
+/// private key). Works on standalone public keys parsed from authorized-keys
+/// lines or `~/.ssh/*.pub`.
+pub fn pubkey_fingerprint(pubkey: &PublicKey) -> String {
+    pubkey.fingerprint(HashAlg::Sha256).to_string()
 }
 
-/// Derive a 32-byte AES-256 key from an SSH private key and a salt.
-///
-/// HKDF-SHA256(salt = vault salt, ikm = private material, info = "dotvault/v1").
-/// Deterministic: the same key + salt always yield the same AES key.
-pub fn derive_key(key: &PrivateKey, salt: &[u8]) -> Result<AesKey> {
-    let ikm = private_material(key);
-    if ikm.is_empty() {
-        bail!("could not extract private-key material for derivation");
-    }
-    let hk = Hkdf::<Sha256>::new(Some(salt), &ikm);
-    let mut out = [0u8; KEY_LEN];
-    hk.expand(HKDF_INFO, &mut out)
-        .map_err(|e| anyhow!("HKDF expand failed: {e}"))?;
-    Ok(AesKey(out))
+/// Parse an OpenSSH authorized-keys line (e.g.
+/// `ssh-ed25519 AAAA... comment`) into a `PublicKey`.
+pub fn parse_pubkey_line(line: &str) -> Result<PublicKey> {
+    PublicKey::from_openssh(line.trim())
+        .map_err(|e| anyhow!("failed to parse SSH public key {:?}: {e}", line))
 }
 
-/// Seal plaintext into a self-contained DV1 container.
-///
-/// Layout: `DV1` | version(1) | nonce(12) | ciphertext | tag(16).
-/// `aes-gcm` appends the tag to the ciphertext, so the tail is `ct||tag`.
-pub fn seal(key: &AesKey, plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher =
-        Aes256Gcm::new_from_slice(&key.0).map_err(|e| anyhow!("AES key init failed: {e}"))?;
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ct = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| anyhow!("encryption failed: {e}"))?;
-
-    let mut out = Vec::with_capacity(HEADER_LEN + ct.len());
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ct); // includes trailing GCM tag
-    Ok(out)
+/// Render a `PublicKey` back to its canonical authorized-keys line.
+pub fn pubkey_to_line(pubkey: &PublicKey) -> Result<String> {
+    Ok(pubkey.to_openssh()?.to_string())
 }
 
-/// Open a DV1 container and return the plaintext.
-///
-/// Fails if the magic/version is wrong or if the GCM tag does not verify
-/// (tamper or wrong key).
-pub fn open(key: &AesKey, container: &[u8]) -> Result<Vec<u8>> {
-    if container.len() < HEADER_LEN + TAG_LEN {
-        bail!("vault container is too small / truncated");
-    }
-    if &container[..3] != MAGIC {
-        bail!("not a dotvault container (bad magic)");
-    }
-    if container[3] != VERSION {
-        bail!(
-            "unsupported dotvault container version {} (expected {})",
-            container[3],
-            VERSION
-        );
-    }
-    let nonce_bytes = &container[4..4 + NONCE_LEN];
-    let ct = &container[4 + NONCE_LEN..];
-    let cipher =
-        Aes256Gcm::new_from_slice(&key.0).map_err(|e| anyhow!("AES key init failed: {e}"))?;
-    let nonce = Nonce::from_slice(nonce_bytes);
-    cipher
-        .decrypt(nonce, ct)
-        .map_err(|_| anyhow!("decryption failed: wrong SSH key or corrupted vault"))
-}
-
-/// Generate a fresh random salt.
-pub fn random_salt() -> [u8; SALT_LEN] {
-    let mut s = [0u8; SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut s);
-    s
+fn privkey_label(key: &PrivateKey) -> String {
+    key.fingerprint(HashAlg::Sha256).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Building a `ssh_key::PrivateKey` from raw bytes pins an `ed25519-dalek`
-    // version that `ssh-key` re-exports internally; to avoid that coupling we
-    // exercise the pure-bytes primitives (HKDF + seal/open) via a fixed AesKey.
-    // End-to-end derivation with a real key is covered by the smoke tests.
-
-    fn fixed_key(b: u8) -> AesKey {
-        AesKey([b; KEY_LEN])
+    fn gen_privkey() -> PrivateKey {
+        PrivateKey::random(&mut rand::thread_rng(), ssh_key::Algorithm::Ed25519)
+            .expect("generate key")
     }
 
     #[test]
-    fn seal_open_roundtrip() {
-        let k = fixed_key(7);
+    fn multi_recipient_roundtrip() {
+        // Encrypt to two keys; either can decrypt.
+        let alice = gen_privkey();
+        let bob = gen_privkey();
+        let a_pub = pubkey_to_line(&alice.public_key().clone()).unwrap();
+        let b_pub = pubkey_to_line(&bob.public_key().clone()).unwrap();
         let pt = b"DB_PASSWORD=s3cret\nAPI_TOKEN=xyz\n";
-        let ct = seal(&k, pt).unwrap();
-        assert_eq!(open(&k, &ct).unwrap(), pt);
+
+        let ct = encrypt_to_recipients(&[a_pub, b_pub], pt).unwrap();
+        assert_eq!(decrypt_with_key(&alice, &ct).unwrap(), pt);
+        assert_eq!(decrypt_with_key(&bob, &ct).unwrap(), pt);
     }
 
     #[test]
-    fn wrong_key_fails() {
+    fn unauthorized_key_cannot_decrypt() {
+        let alice = gen_privkey();
+        let eve = gen_privkey();
+        let a_pub = pubkey_to_line(&alice.public_key().clone()).unwrap();
+        let ct = encrypt_to_recipients(&[a_pub], b"secret").unwrap();
+        assert!(decrypt_with_key(&eve, &ct).is_err());
+    }
+
+    #[test]
+    fn no_recipients_errors() {
+        assert!(encrypt_to_recipients(&[], b"x").is_err());
+    }
+
+    #[test]
+    fn single_recipient_roundtrip() {
+        let k = gen_privkey();
+        let pub_line = pubkey_to_line(&k.public_key().clone()).unwrap();
         let pt = b"hello";
-        let ct = seal(&fixed_key(1), pt).unwrap();
-        assert!(open(&fixed_key(2), &ct).is_err());
+        let ct = encrypt_to_recipients(&[pub_line], pt).unwrap();
+        assert_eq!(decrypt_with_key(&k, &ct).unwrap(), pt);
     }
 
     #[test]
-    fn tamper_fails() {
-        let k = fixed_key(9);
-        let mut ct = seal(&k, b"secret").unwrap();
-        // Flip a byte deep in the ciphertext.
-        let last = ct.len() - 1;
-        ct[last] ^= 0xff;
-        assert!(open(&k, &ct).is_err());
-    }
-
-    #[test]
-    fn header_is_well_formed() {
-        let ct = seal(&fixed_key(1), b"x").unwrap();
-        assert_eq!(&ct[..3], MAGIC);
-        assert_eq!(ct[3], VERSION);
-        // nonce present
-        assert_eq!(&ct[4..16].len(), &NONCE_LEN);
+    fn fingerprint_stable_for_same_key() {
+        let k = gen_privkey();
+        assert_eq!(ssh_fingerprint(&k), ssh_fingerprint(&k));
     }
 }
