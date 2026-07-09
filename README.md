@@ -33,15 +33,26 @@ listed can decrypt; adding/removing a teammate is one command.
 **One line (macOS / Linux):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/install.sh | bash
 ```
 
-Then add `~/.dotvault/bin` to your `PATH` and run `dotvault install`.
+This downloads the latest release binary, verifies its SHA-256 checksum, and
+installs it to `~/.dotvault/bin/dotvault`. Idempotent — re-run to upgrade.
 
-**From source:**
+Then add `~/.dotvault/bin` to your `PATH` (one-time, pick your shell):
 
 ```sh
-cargo build --release   # binary at target/release/dotvault
+echo 'export PATH="$HOME/.dotvault/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
+source ~/.zshrc
+dotvault install          # one-time: create ~/.dotvault/ + default config + skill
+```
+
+**From source (requires Rust toolchain):**
+
+```sh
+git clone https://github.com/oliveagle/dotvault.git
+cd dotvault
+make install              # = cargo build --release + install to ~/.dotvault/bin
 ```
 
 **Prebuilt binaries:** see [Releases](https://github.com/oliveagle/dotvault/releases)
@@ -248,7 +259,7 @@ workflow to build and publish platform binaries.
 ```sh
 scripts/upgrade.sh          # idempotent: no-op if already latest
 # or re-run the installer:
-curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/oliveagle/dotvault/main/install.sh | bash
 ```
 
 `dotvault version` also checks online (cached 1h) and prints an `update: vX.Y.Z
