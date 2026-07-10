@@ -204,18 +204,32 @@ errors with the lock path so you can `rm` it.
 
 ```
 project/
-  .vault                # age container, encrypted to all authorized keys (committed)
-  .vault.keys           # authorized-public-key registry, JSON (committed)
-  .vault.lock           # exclusive lock (gitignored, transient)
+  .vault                  # age container, encrypted to all authorized keys (committed)
+  .vault.keys             # authorized-public-key registry, JSON (committed)
+  .vault.keys.AGENTS.md   # agent-facing guide (committed, plain markdown, no secrets)
+  .vault.lock             # exclusive lock (gitignored, transient)
 
-~/.dotvault/            # global, no secrets
-  config.toml           # optional config
-  backups/              # timestamped, project-prefixed encrypted backups
+~/.dotvault/              # global, no secrets
+  config.toml             # optional config
+  backups/                # timestamped, project-prefixed encrypted backups
     myapp-20260701-120000-a3f0c1.bin
 ```
 
 Each successful write backs up the previous `.vault` before installing the new
 one (atomic temp + rename).
+
+### `.vault.keys.AGENTS.md` — for AI agents, not humans
+
+When you run `dotvault init` we drop a small companion markdown file
+(`.vault.keys.AGENTS.md`) next to `.vault.keys`. It is plain text, contains
+**no secrets**, and is committed to git. Its job is to remind AI agents
+(Claude Code, Codex, Cursor, aider, Cline, gemini-cli, etc.) that this
+project uses dotvault — so the next time an agent needs a GitHub token, an
+OpenAI key, a DB password, or any other credential, it reaches for
+`dotvault get NAME` instead of asking you to paste the value or hardcoding
+it. The note is **never overwritten** on re-init, so you can edit it for
+your team (e.g. add a project-specific section). Re-running `dotvault
+install` does not touch it either.
 
 ## Migrating from v0.3 (centralized namespaces)
 

@@ -141,6 +141,32 @@ dotvault set DB_PASSWORD <新的密码>    # 轮换,让历史密文失效
 | `timed out waiting for lock` | 别的进程卡住了;`rm ./.vault.lock` |
 | legacy PEM format | `ssh-keygen -p -m PEM -f <key>` 转成 OpenSSH 格式 |
 
+## `.vault.keys.AGENTS.md` — companion file for AI agents
+
+`dotvault init` 会自动在项目根生成一个 `.vault.keys.AGENTS.md`(纯 markdown,
+无 secret,提交进 git)。目的是当 AI agent(Claude Code / Codex / Cursor /
+aider / Cline / gemini-cli 等)进入项目 `ls` 或 grep 时,立即意识到:
+
+- 本项目的 secret 存在 `.vault`(age 加密),通过 `dotvault get NAME` 取;
+- **不要**硬编码 API key / token / password 到源码、`.env`、CI YAML、commit
+  message、README;
+- **不要**让用户把 secret 贴到聊天里;应让用户 `dotvault set NAME value`,
+  之后 agent 用 `dotvault get NAME` 拿。
+
+agent 触发场景速查(完整版在 `.vault.keys.AGENTS.md`):
+
+| 场景 | 命令模式 |
+|------|---------|
+| GitHub / GitLab CLI 操作 | `TOKEN=$(dotvault get GITHUB_TOKEN) gh ...` |
+| AWS / GCP / Azure CLI | `export AWS_ACCESS_KEY_ID=$(dotvault get AWS_ACCESS_KEY_ID)` |
+| OpenAI / Anthropic / Azure OpenAI | `export OPENAI_API_KEY=$(dotvault get OPENAI_API_KEY)` |
+| DB 连接 | `PGPASSWORD=$(dotvault get DB_PASSWORD) psql ...` |
+| Slack / Discord / Feishu webhook | `curl -X POST $(dotvault get SLACK_WEBHOOK_URL)` |
+| 自签 JWT / OAuth client_secret | `SECRET=$(dotvault get JWT_SIGNING_KEY) ...` |
+
+owner 可自由编辑 `.vault.keys.AGENTS.md` 加项目专属触发场景;`dotvault init`
+**不会覆盖**已存在的文件(幂等)。
+
 ## 重要约束
 
 - `.vault` 和 `.vault.keys` **要提交进 git**(团队共享)。只有 `.vault.lock`

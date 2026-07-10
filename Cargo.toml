@@ -23,3 +23,8 @@ toml = "0.8"
 [dev-dependencies]
 tempfile = "3"
 ssh-key = { version = "0.6", features = ["ed25519", "encryption", "alloc"] }
+# NOTE: the init-touching unit tests in src/vault.rs serialize themselves via
+# a process-wide `static INIT_LOCK: Mutex<()>` (see that module) rather than
+# `serial_test::serial` — the latter forces the WHOLE test suite to run
+# serially, which inflates the lib-test runtime from 0.01s to 30s. The
+# targeted Mutex<()>::lock() only blocks tests in the `init_dotvault` group.
