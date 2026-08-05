@@ -8,9 +8,14 @@ use anyhow::{bail, Context, Result};
 use crate::access::{self};
 use crate::vault;
 
+// Re-export the auth-dispatch helpers + token commands defined in
+// `commands_auth.rs` so `main.rs` and the write commands here can name them as
+// `commands_auth::*` (the logic lives there for file-size hygiene).
+use crate::commands_auth::{load_vault, require_ssh, resolve_auth};
+
 /// Resolve and load the SSH key path from explicit flag / env / default.
 /// Warns on stderr when the default key is used implicitly.
-fn key_path(explicit: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn key_path(explicit: Option<&Path>) -> Result<PathBuf> {
     let (path, used_default) = resolve_ssh_key_path(explicit)?;
     if used_default {
         eprintln!(
@@ -66,11 +71,13 @@ fn pubkey_line_for(ssh_key_path: &Path) -> Result<String> {
 
 /// Initialize a new project vault: write `.vault` (empty) + `.vault.keys`
 /// seeded with the current user's public key.
-pub fn init(key: &Option<PathBuf>) -> Result<()> {
+pub fn init(key: &Option<PathBuf>, token: &Option<String>) -> Result<()> {
+    let auth = resolve_auth(key, token)?;
+    require_ssh(&auth, "init")?;
     let kp = key_path(key.as_deref())?;
     let pubkey_line = pubkey_line_for(&kp)?;
     let v = vault::Vault::init(&kp, &pubkey_line)?;
-    let fp = crate::crypto::ssh_fingerprint(&v.ssh_key);
+    let fp = crate::crypto::ssh_fingerprint(v.ssh_key.as_ref().expect("init yields a key"));
     eprintln!(
         "Initialized project vault at {} ({} authorized key)",
         v.dir.join(vault::VAULT_FILE).display(),
@@ -128,24 +135,29 @@ pub fn install(key: &Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-pub fn set(key: &Option<PathBuf>, name: &str, value: &str) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let mut v = vault::Vault::load(&kp)?;
+pub fn set(key: &Option<PathBuf>, token: &Option<String>, name: &str, value: &str) -> Result<()> {
+    let auth = resolve_auth(key, token)?;
+    require_ssh(&auth, "set")?;
+    let mut v = load_vault(key, token)?;
     v.set(name, value)?;
     v.save()?;
     eprintln!("Set {}", name);
     Ok(())
 }
 
-pub fn get(key: &Option<PathBuf>, name: &str) -> Result<()> {
+pub fn get(key: &Option<PathBuf>, token: &Option<String>, name: &str) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    get_to(key, name, &mut lock)
+    get_to(key, token, name, &mut lock)
 }
 
-pub fn get_to<W: Write>(key: &Option<PathBuf>, name: &str, out: &mut W) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let v = vault::Vault::load(&kp)?;
+pub fn get_to<W: Write>(
+    key: &Option<PathBuf>,
+    token: &Option<String>,
+    name: &str,
+    out: &mut W,
+) -> Result<()> {
+    let v = load_vault(key, token)?;
     match v.get(name) {
         Some(val) => {
             out.write_all(val.as_bytes())?;
@@ -155,9 +167,10 @@ pub fn get_to<W: Write>(key: &Option<PathBuf>, name: &str, out: &mut W) -> Resul
     }
 }
 
-pub fn rm(key: &Option<PathBuf>, name: &str) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let mut v = vault::Vault::load(&kp)?;
+pub fn rm(key: &Option<PathBuf>, token: &Option<String>, name: &str) -> Result<()> {
+    let auth = resolve_auth(key, token)?;
+    require_ssh(&auth, "rm")?;
+    let mut v = load_vault(key, token)?;
     if !v.remove(name) {
         bail!("no such secret: {}", name);
     }
@@ -166,15 +179,14 @@ pub fn rm(key: &Option<PathBuf>, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn list(key: &Option<PathBuf>) -> Result<()> {
+pub fn list(key: &Option<PathBuf>, token: &Option<String>) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    list_to(key, &mut lock)
+    list_to(key, token, &mut lock)
 }
 
-pub fn list_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let v = vault::Vault::load(&kp)?;
+pub fn list_to<W: Write>(key: &Option<PathBuf>, token: &Option<String>, out: &mut W) -> Result<()> {
+    let v = load_vault(key, token)?;
     let sections = crate::export_render::collect_sections(&v);
     if sections.is_empty() {
         eprintln!("(vault is empty)");
@@ -182,84 +194,42 @@ pub fn list_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     crate::export_render::render_keys(out, &sections)
 }
 
-pub fn export(key: &Option<PathBuf>) -> Result<()> {
+pub fn export(key: &Option<PathBuf>, token: &Option<String>) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    export_to(key, &mut lock)
+    export_to(key, token, &mut lock)
 }
 
-pub fn export_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let v = vault::Vault::load(&kp)?;
+pub fn export_to<W: Write>(
+    key: &Option<PathBuf>,
+    token: &Option<String>,
+    out: &mut W,
+) -> Result<()> {
+    let v = load_vault(key, token)?;
     let sections = crate::export_render::collect_sections(&v);
     crate::export_render::render_kv(out, &sections)
 }
 
-// ---------- render ----------
-
-/// Load the vault, read the template file, and substitute every `{{KEY}}`
-/// with the matching secret value. Returns the fully-rendered document.
-///
-/// Hard-fails (no half-rendered output) when a placeholder names a secret not
-/// in the vault, or when the template has malformed `{{...}}` syntax. See
-/// `crate::template`.
-fn render_core(key: &Option<PathBuf>, template: &Path) -> Result<String> {
-    let kp = key_path(key.as_deref())?;
-    let tmpl = std::fs::read_to_string(template)
-        .with_context(|| format!("failed to read template {}", template.display()))?;
-    let v = vault::Vault::load(&kp)?;
-    crate::template::render(&tmpl, &v.entries)
-}
-
-/// Render `template` and write the result to `out`. Used by tests; the CLI
-/// entry point is `render`.
-pub fn render_to<W: Write>(key: &Option<PathBuf>, template: &Path, out: &mut W) -> Result<()> {
-    let rendered = render_core(key, template)?;
-    out.write_all(rendered.as_bytes())?;
-    Ok(())
-}
-
-/// `dotvault render`: render a template by substituting `{{KEY}}` placeholders
-/// with secret values from the vault.
-///
-/// With `out = None`, the rendered document goes to stdout (raw bytes, no
-/// appended newline) so it can be redirected. With `out = Some(path)`, it is
-/// written atomically to `path` with mode `0600` (it contains secrets) and a
-/// short confirmation is printed to stderr.
-pub fn render(key: &Option<PathBuf>, template: &Path, out: Option<&Path>) -> Result<()> {
-    match out {
-        None => {
-            let stdout = std::io::stdout();
-            let mut lock = stdout.lock();
-            render_to(key, template, &mut lock)
-        }
-        Some(dest) => {
-            let rendered = render_core(key, template)?;
-            crate::util::write_secret_file(dest, rendered.as_bytes())?;
-            eprintln!("Rendered {} → {}", template.display(), dest.display());
-            #[cfg(unix)]
-            eprintln!("  mode: 0600");
-            Ok(())
-        }
-    }
-}
+// NOTE: the `render` / `render_to` commands live in `commands_render.rs`.
 
 /// Add a recipient's public key to the vault and re-encrypt so they can
 /// decrypt. `spec` is an authorized-keys line, a `*.pub` file path, or
-/// `@file` reference.
-pub fn add_key(key: &Option<PathBuf>, spec: &str) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
+/// `@file` reference. Requires an SSH key (tokens are read-only).
+pub fn add_key(key: &Option<PathBuf>, token: &Option<String>, spec: &str) -> Result<()> {
+    let auth = resolve_auth(key, token)?;
+    require_ssh(&auth, "add-key")?;
     let pubkey_line = access::resolve_pubkey_spec(spec)?;
-    let mut v = vault::Vault::load(&kp)?;
+    let mut v = load_vault(key, token)?;
     let fp = v.add_key(&pubkey_line)?;
     println!("Added key {} (now {} authorized)", fp, v.keys.len());
     Ok(())
 }
 
 /// Remove a recipient by fingerprint or label and re-encrypt.
-pub fn remove_key(key: &Option<PathBuf>, query: &str) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let mut v = vault::Vault::load(&kp)?;
+pub fn remove_key(key: &Option<PathBuf>, token: &Option<String>, query: &str) -> Result<()> {
+    let auth = resolve_auth(key, token)?;
+    require_ssh(&auth, "remove-key")?;
+    let mut v = load_vault(key, token)?;
     let removed = v.remove_key(query)?;
     println!(
         "Removed key {} ({}) — {} authorized remain",
@@ -272,19 +242,34 @@ pub fn remove_key(key: &Option<PathBuf>, query: &str) -> Result<()> {
     Ok(())
 }
 
-/// List the authorized recipients.
-pub fn list_keys(key: &Option<PathBuf>) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let v = vault::Vault::load(&kp)?;
-    let my_fp = crate::crypto::ssh_fingerprint(&v.ssh_key);
+// NOTE: the `add-token` / `list-tokens` / `revoke-token` commands live in
+// `commands_auth.rs` (along with the AuthMethod dispatch), to keep this file
+// under the 500-line guideline.
+
+/// List the authorized recipients (SSH keys + read-only tokens). A token
+/// authenticating the command has no SSH fingerprint to mark, so no key is
+/// starred in that case.
+pub fn list_keys(key: &Option<PathBuf>, token: &Option<String>) -> Result<()> {
+    let v = load_vault(key, token)?;
+    let my_fp = v.ssh_key.as_ref().map(crate::crypto::ssh_fingerprint);
     if v.keys.is_empty() {
         eprintln!("(no authorized keys)");
     }
     for k in &v.keys.keys {
-        let mark = if k.fingerprint == my_fp { " *" } else { "  " };
+        let mark = if my_fp.as_deref() == Some(k.fingerprint.as_str()) {
+            " *"
+        } else {
+            "  "
+        };
         println!("{}{}  {}", mark, k.fingerprint, k.label);
     }
-    eprintln!("\n(*) = matches the key used for this command");
+    if v.keys.token_count() > 0 {
+        eprintln!("\nread-only tokens:");
+        for t in &v.keys.tokens {
+            println!("   {}  {}", t.public_key, t.label);
+        }
+    }
+    eprintln!("\n(*) = matches the SSH key used for this command");
     Ok(())
 }
 
@@ -321,20 +306,23 @@ pub fn version_to<W: Write>(out: &mut W) -> Result<()> {
     Ok(())
 }
 
-/// Verify the project vault: decrypt, report entries + authorized keys.
-pub fn doctor(key: &Option<PathBuf>) -> Result<()> {
+/// Verify the project vault: decrypt, report entries + authorized keys/tokens.
+pub fn doctor(key: &Option<PathBuf>, token: &Option<String>) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    doctor_to(key, &mut lock)
+    doctor_to(key, token, &mut lock)
 }
 
-pub fn doctor_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
-    let kp = key_path(key.as_deref())?;
-    let v = match vault::Vault::load(&kp) {
+pub fn doctor_to<W: Write>(
+    key: &Option<PathBuf>,
+    token: &Option<String>,
+    out: &mut W,
+) -> Result<()> {
+    let v = match load_vault(key, token) {
         Ok(v) => v,
         Err(e) => bail!("doctor: could not open vault: {e:#}"),
     };
-    let my_fp = crate::crypto::ssh_fingerprint(&v.ssh_key);
+    let my_fp = v.ssh_key.as_ref().map(crate::crypto::ssh_fingerprint);
     writeln!(
         out,
         "vault           : {}",
@@ -343,8 +331,18 @@ pub fn doctor_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     writeln!(out, "entries         : {}", v.entries.len())?;
     writeln!(out, "authorized keys : {}", v.keys.len())?;
     for k in &v.keys.keys {
-        let mark = if k.fingerprint == my_fp { "*" } else { " " };
+        let mark = if my_fp.as_deref() == Some(k.fingerprint.as_str()) {
+            "*"
+        } else {
+            " "
+        };
         writeln!(out, "  {mark} {}  {}", k.fingerprint, k.label)?;
+    }
+    if v.keys.token_count() > 0 {
+        writeln!(out, "read-only tokens: {}", v.keys.token_count())?;
+        for t in &v.keys.tokens {
+            writeln!(out, "    {}  {}", t.public_key, t.label)?;
+        }
     }
     writeln!(out, "status          : OK")?;
     Ok(())

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use dotvault::commands;
+use dotvault::{commands, commands_auth, commands_render};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,6 +21,13 @@ struct Cli {
     /// `dotvault --key ~/.ssh/id_ed25519 set A 1`.
     #[arg(long)]
     key: Option<PathBuf>,
+
+    /// Read-only access token (`AGE-SECRET-KEY-1...`) for CI / automation.
+    /// Env: DOTVAULT_TOKEN. Mutually exclusive with --key. Grants read access
+    /// only; write commands (set/rm/add-key/remove-key/add-token/revoke-token/
+    /// init) require an SSH key.
+    #[arg(long, env = "DOTVAULT_TOKEN", value_name = "TOKEN")]
+    token: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -72,6 +79,22 @@ enum Command {
         /// Fingerprint (`SHA256:...`) or label of the key to remove.
         query: String,
     },
+    /// Generate a read-only token for CI / automation. Prints the token
+    /// secret (AGE-SECRET-KEY-1...) to stdout ONCE; store it in your CI secret
+    /// store. Requires an SSH key (tokens cannot mint tokens).
+    AddToken {
+        /// Human-readable label for the token (e.g. "ci-deploy").
+        label: String,
+    },
+    /// List authorized read-only tokens (label + age1... public key). The
+    /// secret is never shown.
+    ListTokens,
+    /// Revoke a read-only token by label or `age1...` public key. Re-encrypts
+    /// so the token can no longer decrypt the current vault. Requires an SSH key.
+    RevokeToken {
+        /// Label or `age1...` public key of the token to revoke.
+        query: String,
+    },
     /// List the authorized recipients (fingerprints + labels).
     ListKeys,
     /// Show or set global config (~/.dotvault/config.toml).
@@ -94,6 +117,11 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // --key and --token are mutually exclusive (the commands layer also
+    // re-checks, but failing here gives clap-style clarity before dispatch).
+    if cli.key.is_some() && cli.token.is_some() {
+        bail!("--key and --token are mutually exclusive; pass only one");
+    }
     // Validate the secret name for set, to keep export safe for shells.
     if let Command::Set { key, .. } = &cli.command {
         if !is_valid_env_name(key) {
@@ -104,23 +132,34 @@ fn main() -> Result<()> {
         }
     }
     match cli.command {
-        Command::Install => commands::install(&cli.key),
-        Command::Init => commands::init(&cli.key),
-        Command::Set { key, value } => commands::set(&cli.key, &key, &value),
-        Command::Get { key } => commands::get(&cli.key, &key),
-        Command::Rm { key } => commands::rm(&cli.key, &key),
-        Command::List => commands::list(&cli.key),
-        Command::Export => commands::export(&cli.key),
-        Command::Render { template, out } => commands::render(&cli.key, &template, out.as_deref()),
-        Command::AddKey { pubkey } => commands::add_key(&cli.key, &pubkey),
-        Command::RemoveKey { query } => commands::remove_key(&cli.key, &query),
-        Command::ListKeys => commands::list_keys(&cli.key),
+        // install/init are SSH-only (token can't bootstrap or write).
+        Command::Install => {
+            if cli.token.is_some() {
+                bail!("tokens are read-only: `install` requires no token (it sets up global env, not a vault)");
+            }
+            commands::install(&cli.key)
+        }
+        Command::Init => commands::init(&cli.key, &cli.token),
+        Command::Set { key, value } => commands::set(&cli.key, &cli.token, &key, &value),
+        Command::Get { key } => commands::get(&cli.key, &cli.token, &key),
+        Command::Rm { key } => commands::rm(&cli.key, &cli.token, &key),
+        Command::List => commands::list(&cli.key, &cli.token),
+        Command::Export => commands::export(&cli.key, &cli.token),
+        Command::Render { template, out } => {
+            commands_render::render(&cli.key, &cli.token, &template, out.as_deref())
+        }
+        Command::AddKey { pubkey } => commands::add_key(&cli.key, &cli.token, &pubkey),
+        Command::RemoveKey { query } => commands::remove_key(&cli.key, &cli.token, &query),
+        Command::AddToken { label } => commands_auth::add_token(&cli.key, &cli.token, &label),
+        Command::ListTokens => commands_auth::list_tokens(&cli.key, &cli.token),
+        Command::RevokeToken { query } => commands_auth::revoke_token(&cli.key, &cli.token, &query),
+        Command::ListKeys => commands::list_keys(&cli.key, &cli.token),
         Command::Config {
             set_key,
             set_backup_dir,
             set_backup_keep,
         } => commands::config(&set_key, &set_backup_dir, &set_backup_keep),
-        Command::Doctor => commands::doctor(&cli.key),
+        Command::Doctor => commands::doctor(&cli.key, &cli.token),
         Command::Version => commands::version(),
     }
 }

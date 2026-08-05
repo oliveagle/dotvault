@@ -3,12 +3,14 @@
 SSH-key encrypted, **multi-recipient** secret vault that exports to `.env`
 format. Each project keeps its own encrypted `.vault` file **committed to
 git**, and every authorized teammate can decrypt it with their own SSH key.
+A read-only **token** mode lets CI/automation read secrets without an SSH key.
 
 `dotvault` stores passwords, API tokens, and other secrets in a project-local
 `.vault` file (an [age](https://age-encryption.org) container encrypted to the
-SSH public keys of every authorized recipient). The list of authorized keys
-lives in `.vault.keys` (JSON, also committed). Anyone on the team whose key is
-listed can decrypt; adding/removing a teammate is one command.
+SSH public keys of every authorized recipient, plus any read-only tokens). The
+list of authorized keys lives in `.vault.keys` (JSON, also committed). Anyone
+on the team whose key is listed can decrypt; adding/removing a teammate is one
+command.
 
 ## How it works
 
@@ -116,6 +118,34 @@ Load everything into the current shell:
 eval "$(dotvault export | sed 's/^/export /')"
 ```
 
+### Read-only tokens for CI
+
+Generate a read-only token (it's an `AGE-SECRET-KEY-1...` string), then store
+it as a secret in your CI (GitHub Actions secrets, GitLab CI variables, etc.).
+CI uses `--token` (or `DOTVAULT_TOKEN` env) to read — it CANNOT write:
+
+```sh
+# On your laptop (needs your SSH key):
+dotvault add-token ci-deploy                  # prints AGE-SECRET-KEY-1... ONCE — copy it
+# → paste into CI as secret DOTVAULT_TOKEN
+
+# In CI (no SSH key needed, read-only):
+dotvault --token "$DOTVAULT_TOKEN" export > .env
+dotvault --token "$DOTVAULT_TOKEN" get DB_PASSWORD
+dotvault --token "$DOTVAULT_TOKEN" render config.yaml.tmpl --out config.yaml
+
+# Manage tokens (SSH key required):
+dotvault list-tokens                          # shows age1... public keys (never the secret)
+dotvault revoke-token ci-deploy               # revoke: re-encrypts, token stops working immediately
+```
+
+A token grants full **read** of all secrets. "Read-only" is enforced at
+runtime (write commands are rejected) — cryptographically a token can decrypt
+everything an SSH key can, so treat a leaked token as seriously as a leaked
+SSH key: revoke it and **rotate** any sensitive secret values. The token
+secret is shown **once** at creation and is never stored; only its public key
+(`age1...`) lives in `.vault.keys`.
+
 ## Commands
 
 ```
@@ -129,7 +159,10 @@ dotvault export                        # KEY=VALUE
 dotvault render <TEMPLATE> [--out F]   # substitute {{KEY}} in a template → stdout / file (0600)
 dotvault add-key <PUBKEY>              # authorize a teammate (pubkey line / *.pub / @file)
 dotvault remove-key <FP|LABEL>         # revoke a teammate (re-encrypts; see Security)
-dotvault list-keys                     # list authorized recipients (fingerprints + labels)
+dotvault add-token <LABEL>             # create a read-only CI token (prints secret ONCE)
+dotvault list-tokens                   # list read-only tokens (age1... public keys)
+dotvault revoke-token <LABEL|age1...>  # revoke a token (re-encrypts; see Security)
+dotvault list-keys                     # list authorized recipients + tokens
 dotvault doctor                        # verify vault + list authorized keys
 dotvault version                       # print version + git hash + build details
 dotvault config [--set-key ...]        # show/set ~/.dotvault/config.toml
@@ -145,7 +178,9 @@ scripts/upgrade.sh                     # idempotent: no-op if already latest
 Top-level option (must precede the subcommand):
 
 ```
---key <PATH>   SSH private key (default ~/.ssh/id_ed25519, env DOTVAULT_KEY)
+--key <PATH>     SSH private key (default ~/.ssh/id_ed25519, env DOTVAULT_KEY)
+--token <TOKEN>  read-only access token for CI (env DOTVAULT_TOKEN). Mutually
+                 exclusive with --key; rejects write commands.
 ```
 
 ## Security model

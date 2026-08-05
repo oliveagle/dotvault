@@ -54,6 +54,11 @@ dotvault --key ~/.ssh/id_ed25519 add-key ~/.ssh/bob_id_ed25519.pub
 # 吊销队友(按指纹 SHA256:... 或 label)
 dotvault --key ~/.ssh/id_ed25519 remove-key <FINGERPRINT|LABEL>
 
+# 只读 token(CI 用,需 SSH key 授权创建;token 明文只显示一次)
+dotvault --key ~/.ssh/id_ed25519 add-token ci-deploy       # 打印 AGE-SECRET-KEY-1... 一次
+dotvault --key ~/.ssh/id_ed25519 list-tokens               # 列出 age1... 公钥(不显示明文)
+dotvault --key ~/.ssh/id_ed25519 revoke-token <LABEL|age1...>
+
 # 列出已授权的接收方
 dotvault --key ~/.ssh/id_ed25519 list-keys
 
@@ -121,7 +126,25 @@ dotvault render config.yaml.tmpl --out config.yaml   # 写文件,权限 0600
 dotvault render config.yaml.tmpl                     # → stdout(可重定向)
 ```
 
-### 场景 4:新人加入 / 离开
+### 场景 4:CI 只读访问(token 模式)
+CI 不能放 SSH 私钥(泄露风险大)。用 `add-token` 生成一个只读 token(`AGE-SECRET-KEY-1...`),
+存进 CI 的 secret store,GitHub Actions 用 `secrets.`,GitLab CI 用 variables。
+```sh
+# 本地创建(需 SSH key),token 明文只显示这一次:
+dotvault add-token ci-deploy              # → 复制 AGE-SECRET-KEY-1... 进 CI 的 DOTVAULT_TOKEN
+
+# CI 里只读取(--token 或 env DOTVAULT_TOKEN),写命令被拒绝:
+dotvault --token "$DOTVAULT_TOKEN" export > .env
+dotvault --token "$DOTVAULT_TOKEN" render config.yaml.tmpl --out config.yaml
+
+# 吊销(需 SSH key;revoke 后旧 token 立即无法解密当前 .vault):
+dotvault revoke-token ci-deploy
+```
+⚠ **token = 等价于 SSH key 的解密能力**,能读全部 secret;"只读"是运行时强制,
+不是密码学边界。token 泄露 = 当作 SSH key 泄露处理:revoke + 轮换敏感 secret。
+token 明文不存储,丢了只能 revoke + 重新 add。
+
+### 场景 5:新人加入 / 离开
 ```sh
 # 加入:管理员 add-key 后提交,新人 pull 即可解密
 dotvault add-key ~/.ssh/newguy.pub

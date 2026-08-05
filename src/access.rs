@@ -36,6 +36,11 @@ pub struct AuthorizedKey {
     pub added_at: String,
 }
 
+// Re-export the read-only token type + helpers here so existing callers can
+// keep using `access::AuthorizedToken` / `access::authorized_token`; the
+// definitions + logic live in `access_token`.
+pub use crate::access_token::{authorized_token, AuthorizedToken};
+
 /// The full authorized-key registry, serialized to `.vault.keys`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultKeys {
@@ -45,8 +50,13 @@ pub struct VaultKeys {
     pub created_at: String,
     /// ISO-8601 timestamp of the last modification.
     pub updated_at: String,
-    /// Authorized recipients. Order is insertion order (stable under edits).
+    /// Authorized SSH-key recipients. Order is insertion order.
     pub keys: Vec<AuthorizedKey>,
+    /// Read-only X25519 tokens (`age1...` public keys). The matching secret
+    /// is never stored. `#[serde(default)]` keeps older `.vault.keys` files
+    /// (created before tokens existed) loadable as an empty token list.
+    #[serde(default)]
+    pub tokens: Vec<AuthorizedToken>,
 }
 
 impl VaultKeys {
@@ -57,6 +67,7 @@ impl VaultKeys {
             created_at: now.to_string(),
             updated_at: now.to_string(),
             keys: vec![initial],
+            tokens: Vec::new(),
         }
     }
 
@@ -67,6 +78,7 @@ impl VaultKeys {
             created_at: now.to_string(),
             updated_at: now.to_string(),
             keys: Vec::new(),
+            tokens: Vec::new(),
         }
     }
 
@@ -116,15 +128,19 @@ impl VaultKeys {
         Some(removed)
     }
 
-    /// Number of authorized recipients.
+    /// Number of authorized SSH-key recipients.
     pub fn len(&self) -> usize {
         self.keys.len()
     }
 
-    /// Whether the registry has no recipients.
+    /// Whether the registry has no SSH-key recipients.
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
+
+    // NOTE: token-handling methods (find_token / add_token / remove_token /
+    // token_count / token_pubkeys) live in `access_token.rs` as an extension
+    // `impl VaultKeys`, to keep this file under the 500-line guideline.
 }
 
 /// Load and parse a `.vault.keys` file from `path`. Validates that every
@@ -150,6 +166,17 @@ pub fn load_keys(path: &Path) -> Result<VaultKeys> {
                 path.display(),
                 i + 1,
                 k.fingerprint
+            )
+        })?;
+    }
+    // Likewise validate every token public key parses as an age1... recipient.
+    for (i, t) in keys.tokens.iter().enumerate() {
+        crypto::parse_token_pubkey(&t.public_key).map_err(|e| {
+            anyhow::anyhow!(
+                "{} token #{} (label {}) has an invalid public_key: {e}",
+                path.display(),
+                i + 1,
+                t.label
             )
         })?;
     }
@@ -388,5 +415,57 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_string_pretty(&empty).unwrap()).unwrap();
         assert!(load_keys(&path).is_err());
+    }
+
+    // ---------- token (X25519) registry: load_keys behavior ----------
+    // (The token CRUD methods themselves are unit-tested in `access_token.rs`.)
+
+    #[test]
+    fn serde_defaults_missing_tokens_to_empty() {
+        // A .vault.keys written by an older dotvault (no `tokens` field) must
+        // still load, with tokens defaulting to empty.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".vault.keys");
+        let k = gen_pubkey();
+        let ak = authorized_key_from_pubkey(&k).unwrap();
+        let legacy = serde_json::json!({
+            "version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "keys": [ak]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+        let vk = load_keys(&path).unwrap();
+        assert!(
+            vk.tokens.is_empty(),
+            "legacy file should yield empty tokens"
+        );
+        assert_eq!(vk.token_count(), 0);
+    }
+
+    #[test]
+    fn load_keys_rejects_corrupt_token_pubkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".vault.keys");
+        let k = gen_pubkey();
+        let ak = authorized_key_from_pubkey(&k).unwrap();
+        let bad = serde_json::json!({
+            "version": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "keys": [ak],
+            "tokens": [{
+                "public_key": "not-an-age-key",
+                "label": "broken",
+                "added_at": "2026-01-01T00:00:00Z"
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&bad).unwrap()).unwrap();
+        let err = load_keys(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("token #1") && msg.contains("broken"),
+            "should flag the bad token, got: {msg}"
+        );
     }
 }

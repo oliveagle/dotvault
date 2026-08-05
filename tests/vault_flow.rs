@@ -10,6 +10,7 @@ mod common;
 use std::sync::{Mutex, OnceLock};
 
 use dotvault::commands;
+use dotvault::commands_render;
 use dotvault::vault;
 
 use common::TestKey;
@@ -63,7 +64,7 @@ impl Iso {
 
 env_test!(init_creates_vault_and_keys_file, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
 
     // .vault and .vault.keys exist in the project dir.
     let vpath = vault::vault_path().unwrap();
@@ -79,45 +80,45 @@ env_test!(init_creates_vault_and_keys_file, {
 
 env_test!(init_twice_errors, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    assert!(commands::init(&iso.key_opt()).is_err());
+    commands::init(&iso.key_opt(), &None).unwrap();
+    assert!(commands::init(&iso.key_opt(), &None).is_err());
 });
 
 // ---------- set / get / rm / list ----------
 
 env_test!(set_get_roundtrip, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "DB_PASSWORD", "s3cret").unwrap();
 
     let mut out = Vec::new();
-    commands::get_to(&iso.key_opt(), "DB_PASSWORD", &mut out).unwrap();
+    commands::get_to(&iso.key_opt(), &None, "DB_PASSWORD", &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "s3cret");
 });
 
 env_test!(set_duplicate_errors, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "A", "1").unwrap();
-    assert!(commands::set(&iso.key_opt(), "A", "2").is_err());
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "A", "1").unwrap();
+    assert!(commands::set(&iso.key_opt(), &None, "A", "2").is_err());
 });
 
 env_test!(rm_removes_secret, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "A", "1").unwrap();
-    commands::rm(&iso.key_opt(), "A").unwrap();
-    assert!(commands::get(&iso.key_opt(), "A").is_err());
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "A", "1").unwrap();
+    commands::rm(&iso.key_opt(), &None, "A").unwrap();
+    assert!(commands::get(&iso.key_opt(), &None, "A").is_err());
 });
 
 env_test!(export_renders_all_entries, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "A", "1").unwrap();
-    commands::set(&iso.key_opt(), "B", "two").unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "A", "1").unwrap();
+    commands::set(&iso.key_opt(), &None, "B", "two").unwrap();
 
     let mut out = Vec::new();
-    commands::export_to(&iso.key_opt(), &mut out).unwrap();
+    commands::export_to(&iso.key_opt(), &None, &mut out).unwrap();
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("A=1"), "export should contain A=1:\n{s}");
     assert!(s.contains("B=two"), "export should contain B=two:\n{s}");
@@ -129,73 +130,73 @@ env_test!(added_key_can_decrypt, {
     // Alice inits and adds Bob; Bob can then decrypt with his own key.
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
-    commands::set(&alice, "SECRET", "value").unwrap();
+    commands::init(&alice, &None).unwrap();
+    commands::set(&alice, &None, "SECRET", "value").unwrap();
 
     let bob = TestKey::new();
-    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+    commands::add_key(&alice, &None, &bob.pubkey_path.to_string_lossy()).unwrap();
 
     // Bob loads the same project vault with his key and reads the secret.
     let mut out = Vec::new();
-    commands::get_to(&Some(bob.path.clone()), "SECRET", &mut out).unwrap();
+    commands::get_to(&Some(bob.path.clone()), &None, "SECRET", &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "value");
 });
 
 env_test!(unauthorized_key_cannot_decrypt, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
-    commands::set(&alice, "SECRET", "value").unwrap();
+    commands::init(&alice, &None).unwrap();
+    commands::set(&alice, &None, "SECRET", "value").unwrap();
 
     let eve = TestKey::new();
     // Eve has NOT been authorized; loading must fail.
-    assert!(commands::get(&Some(eve.path.clone()), "SECRET").is_err());
+    assert!(commands::get(&Some(eve.path.clone()), &None, "SECRET").is_err());
 });
 
 env_test!(remove_key_blocks_decryption, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
-    commands::set(&alice, "SECRET", "value").unwrap();
+    commands::init(&alice, &None).unwrap();
+    commands::set(&alice, &None, "SECRET", "value").unwrap();
 
     let bob = TestKey::new();
-    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+    commands::add_key(&alice, &None, &bob.pubkey_path.to_string_lossy()).unwrap();
     // Bob is authorized now.
-    assert!(commands::get(&Some(bob.path.clone()), "SECRET").is_ok());
+    assert!(commands::get(&Some(bob.path.clone()), &None, "SECRET").is_ok());
 
     // Remove Bob by his fingerprint, then he can no longer decrypt the
     // CURRENT ciphertext.
     let bob_fp =
         dotvault::crypto::ssh_fingerprint(&dotvault::crypto::load_private_key(&bob.path).unwrap());
-    commands::remove_key(&alice, &bob_fp).unwrap();
-    assert!(commands::get(&Some(bob.path.clone()), "SECRET").is_err());
+    commands::remove_key(&alice, &None, &bob_fp).unwrap();
+    assert!(commands::get(&Some(bob.path.clone()), &None, "SECRET").is_err());
 });
 
 env_test!(remove_last_key_refused, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
+    commands::init(&alice, &None).unwrap();
     // Only Alice is authorized; removing her must be refused.
     let alice_fp = dotvault::crypto::ssh_fingerprint(
         &dotvault::crypto::load_private_key(&alice.unwrap()).unwrap(),
     );
-    assert!(commands::remove_key(&iso.key_opt(), &alice_fp).is_err());
+    assert!(commands::remove_key(&iso.key_opt(), &None, &alice_fp).is_err());
 });
 
 env_test!(add_duplicate_key_refused, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
+    commands::init(&alice, &None).unwrap();
     // Re-adding Alice's own pubkey must be refused (already present).
-    assert!(commands::add_key(&alice, &iso.key.pubkey_path.to_string_lossy()).is_err());
+    assert!(commands::add_key(&alice, &None, &iso.key.pubkey_path.to_string_lossy()).is_err());
 });
 
 env_test!(list_keys_shows_authorized, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
+    commands::init(&alice, &None).unwrap();
     let bob = TestKey::new();
-    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+    commands::add_key(&alice, &None, &bob.pubkey_path.to_string_lossy()).unwrap();
 
     // Load the vault and check the registry has 2 keys.
     let v = vault::Vault::load(&alice.unwrap()).unwrap();
@@ -206,19 +207,19 @@ env_test!(list_keys_shows_authorized, {
 
 env_test!(load_without_init_errors, {
     let iso = Iso::new();
-    assert!(commands::get(&iso.key_opt(), "X").is_err());
+    assert!(commands::get(&iso.key_opt(), &None, "X").is_err());
 });
 
 // ---------- command-layer coverage (list/list_keys/doctor/add_key @file) ----------
 
 env_test!(list_outputs_key_names, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "ALPHA", "1").unwrap();
-    commands::set(&iso.key_opt(), "BETA", "2").unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "ALPHA", "1").unwrap();
+    commands::set(&iso.key_opt(), &None, "BETA", "2").unwrap();
 
     let mut out = Vec::new();
-    commands::list_to(&iso.key_opt(), &mut out).unwrap();
+    commands::list_to(&iso.key_opt(), &None, &mut out).unwrap();
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("ALPHA"), "list should name ALPHA:\n{s}");
     assert!(s.contains("BETA"), "list should name BETA:\n{s}");
@@ -229,9 +230,9 @@ env_test!(list_outputs_key_names, {
 env_test!(list_keys_command_marks_current_user, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
+    commands::init(&alice, &None).unwrap();
     let bob = TestKey::new();
-    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+    commands::add_key(&alice, &None, &bob.pubkey_path.to_string_lossy()).unwrap();
 
     // Verify via vault load that 2 keys are present and current user is authorized.
     let v = vault::Vault::load(&alice.unwrap()).unwrap();
@@ -242,11 +243,11 @@ env_test!(list_keys_command_marks_current_user, {
 
 env_test!(doctor_reports_status_ok, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "A", "1").unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "A", "1").unwrap();
 
     let mut out = Vec::new();
-    commands::doctor_to(&iso.key_opt(), &mut out).unwrap();
+    commands::doctor_to(&iso.key_opt(), &None, &mut out).unwrap();
     let s = String::from_utf8(out).unwrap();
     assert!(
         s.contains("status          : OK"),
@@ -265,8 +266,8 @@ env_test!(doctor_reports_status_ok, {
 env_test!(add_key_via_at_file_syntax, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
-    commands::set(&alice, "SHARED", "v1").unwrap();
+    commands::init(&alice, &None).unwrap();
+    commands::set(&alice, &None, "SHARED", "v1").unwrap();
 
     let bob = TestKey::new();
     // Write Bob's pubkey to a temp file, then add via @file syntax.
@@ -274,11 +275,11 @@ env_test!(add_key_via_at_file_syntax, {
     let spec_file = std::env::temp_dir().join("dv_bob_pubkey.txt");
     std::fs::write(&spec_file, &bob_line).unwrap();
 
-    commands::add_key(&alice, &format!("@{}", spec_file.display())).unwrap();
+    commands::add_key(&alice, &None, &format!("@{}", spec_file.display())).unwrap();
 
     // Bob can now decrypt SHARED.
     let mut out = Vec::new();
-    commands::get_to(&Some(bob.path.clone()), "SHARED", &mut out).unwrap();
+    commands::get_to(&Some(bob.path.clone()), &None, "SHARED", &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "v1");
     let _ = std::fs::remove_file(&spec_file);
 });
@@ -286,35 +287,35 @@ env_test!(add_key_via_at_file_syntax, {
 env_test!(remove_key_command_by_fingerprint, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
+    commands::init(&alice, &None).unwrap();
     let bob = TestKey::new();
-    commands::add_key(&alice, &bob.pubkey_path.to_string_lossy()).unwrap();
+    commands::add_key(&alice, &None, &bob.pubkey_path.to_string_lossy()).unwrap();
 
     // Remove by fingerprint via the command layer.
     let bob_fp =
         dotvault::crypto::ssh_fingerprint(&dotvault::crypto::load_private_key(&bob.path).unwrap());
-    commands::remove_key(&alice, &bob_fp).unwrap();
+    commands::remove_key(&alice, &None, &bob_fp).unwrap();
     // Bob can no longer decrypt.
-    assert!(commands::get(&Some(bob.path.clone()), "A").is_err());
+    assert!(commands::get(&Some(bob.path.clone()), &None, "A").is_err());
 });
 
 env_test!(get_missing_secret_errors, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    assert!(commands::get(&iso.key_opt(), "NOPE").is_err());
+    commands::init(&iso.key_opt(), &None).unwrap();
+    assert!(commands::get(&iso.key_opt(), &None, "NOPE").is_err());
 });
 
 env_test!(rm_missing_secret_errors, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    assert!(commands::rm(&iso.key_opt(), "NOPE").is_err());
+    commands::init(&iso.key_opt(), &None).unwrap();
+    assert!(commands::rm(&iso.key_opt(), &None, "NOPE").is_err());
 });
 
 env_test!(export_empty_vault_produces_warning, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
     let mut out = Vec::new();
-    commands::export_to(&iso.key_opt(), &mut out).unwrap();
+    commands::export_to(&iso.key_opt(), &None, &mut out).unwrap();
     // Empty vault exports nothing (no sections).
     let s = String::from_utf8(out).unwrap();
     assert!(!s.contains("="), "empty vault should export no KEY=VALUE");
@@ -323,9 +324,9 @@ env_test!(export_empty_vault_produces_warning, {
 env_test!(add_key_invalid_pubkey_errors, {
     let iso = Iso::new();
     let alice = iso.key_opt();
-    commands::init(&alice).unwrap();
+    commands::init(&alice, &None).unwrap();
     // A garbage string is not a valid pubkey.
-    assert!(commands::add_key(&alice, "not-a-valid-key").is_err());
+    assert!(commands::add_key(&alice, &None, "not-a-valid-key").is_err());
 });
 
 // ---------- install / config / resolve_ssh_key_path coverage ----------
@@ -376,12 +377,12 @@ env_test!(version_prints_pkg_version, {
 
 env_test!(set_uses_explicit_key_flag, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
     // Pass key explicitly (not via env). DOTVAULT_KEY is not set in Iso.
     std::env::remove_var("DOTVAULT_KEY");
-    commands::set(&iso.key_opt(), "FLAG_TEST", "ok").unwrap();
+    commands::set(&iso.key_opt(), &None, "FLAG_TEST", "ok").unwrap();
     let mut out = Vec::new();
-    commands::get_to(&iso.key_opt(), "FLAG_TEST", &mut out).unwrap();
+    commands::get_to(&iso.key_opt(), &None, "FLAG_TEST", &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "ok");
 });
 
@@ -396,9 +397,9 @@ fn write_tmpl(name: &str, body: &str) -> std::path::PathBuf {
 
 env_test!(render_substitutes_placeholders, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
-    commands::set(&iso.key_opt(), "API_TOKEN", "ghp_xxx").unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "DB_PASSWORD", "s3cret").unwrap();
+    commands::set(&iso.key_opt(), &None, "API_TOKEN", "ghp_xxx").unwrap();
 
     let tmpl = write_tmpl(
         "config.yaml.tmpl",
@@ -406,7 +407,7 @@ env_test!(render_substitutes_placeholders, {
     );
 
     let mut out = Vec::new();
-    commands::render_to(&iso.key_opt(), &tmpl, &mut out).unwrap();
+    commands_render::render_to(&iso.key_opt(), &None, &tmpl, &mut out).unwrap();
     let s = String::from_utf8(out).unwrap();
     assert!(s.contains("password: s3cret"), "rendered:\n{s}");
     assert!(s.contains("api_key: ghp_xxx"), "rendered:\n{s}");
@@ -424,13 +425,13 @@ env_test!(render_substitutes_placeholders, {
 
 env_test!(render_to_out_file_writes_0600, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
-    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
+    commands::set(&iso.key_opt(), &None, "DB_PASSWORD", "s3cret").unwrap();
 
     let tmpl = write_tmpl("t.tmpl", "password: {{DB_PASSWORD}}\n");
     let dest = std::env::current_dir().unwrap().join("rendered.yaml");
 
-    commands::render(&iso.key_opt(), &tmpl, Some(&dest)).unwrap();
+    commands_render::render(&iso.key_opt(), &None, &tmpl, Some(&dest)).unwrap();
 
     let body = std::fs::read_to_string(&dest).unwrap();
     assert_eq!(body, "password: s3cret\n");
@@ -452,13 +453,13 @@ env_test!(render_to_out_file_writes_0600, {
 
 env_test!(render_unknown_key_errors, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
     // DB_PASSWORD exists, but MISSING does not.
-    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
+    commands::set(&iso.key_opt(), &None, "DB_PASSWORD", "s3cret").unwrap();
 
     let tmpl = write_tmpl("t.tmpl", "x: {{MISSING}}");
     let mut out = Vec::new();
-    let err = commands::render_to(&iso.key_opt(), &tmpl, &mut out).unwrap_err();
+    let err = commands_render::render_to(&iso.key_opt(), &None, &tmpl, &mut out).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("unknown secret"), "{msg}");
     assert!(msg.contains("\"MISSING\""), "{msg}");
@@ -471,7 +472,7 @@ env_test!(render_without_init_errors, {
     // No init. The template exists, but there is no vault.
     let tmpl = write_tmpl("t.tmpl", "x: {{A}}");
     let mut out = Vec::new();
-    let err = commands::render_to(&iso.key_opt(), &tmpl, &mut out).unwrap_err();
+    let err = commands_render::render_to(&iso.key_opt(), &None, &tmpl, &mut out).unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("no vault") || msg.contains("init"),
@@ -481,8 +482,8 @@ env_test!(render_without_init_errors, {
 
 env_test!(render_missing_template_file_errors, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
     let tmpl = std::env::current_dir().unwrap().join("does_not_exist.tmpl");
     let mut out = Vec::new();
-    assert!(commands::render_to(&iso.key_opt(), &tmpl, &mut out).is_err());
+    assert!(commands_render::render_to(&iso.key_opt(), &None, &tmpl, &mut out).is_err());
 });

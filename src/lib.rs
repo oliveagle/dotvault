@@ -8,8 +8,11 @@
 //! by the CLI binary and by integration tests.
 
 pub mod access;
+pub mod access_token;
 pub mod backup;
 pub mod commands;
+pub mod commands_auth;
+pub mod commands_render;
 pub mod config;
 pub mod crypto;
 pub mod envfmt;
@@ -19,3 +22,5 @@ pub mod template;
 pub mod update;
 pub mod util;
 pub mod vault;
+pub mod vault_lock;
+pub mod vault_token;

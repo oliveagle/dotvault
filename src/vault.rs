@@ -13,13 +13,13 @@
 //! holds only config, backups, and the update-check cache.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
 use crate::access::{self, AuthorizedKey, VaultKeys, KEYS_FILE};
 use crate::crypto;
 use crate::envfmt;
+use crate::vault_lock::{acquire_lock, release_lock};
 
 /// The encrypted vault file in the project root.
 pub const VAULT_FILE: &str = ".vault";
@@ -30,10 +30,8 @@ pub const VAULT_FILE: &str = ".vault";
 pub const KEYS_AGENTS_FILE: &str = ".vault.keys.AGENTS.md";
 /// The (gitignored) exclusive lock file.
 pub const LOCK_FILE: &str = ".vault.lock";
-/// Busy-wait poll interval for acquiring the lock.
-const LOCK_POLL_MS: u64 = 5;
-/// Max time to wait for the lock before giving up.
-const LOCK_TIMEOUT_SECS: u64 = 30;
+// Lock poll interval + timeout live in `vault_lock.rs` (along with the
+// acquire/release helpers), to keep this file under the 500-line guideline.
 
 /// Root of the global config dir: `~/.dotvault`. Override via `DOTVAULT_HOME`.
 /// Holds config.toml, backups/, and the update-check cache — no secrets.
@@ -72,11 +70,14 @@ pub struct Vault {
     /// The authorized-public-key registry (`.vault.keys`).
     pub keys: VaultKeys,
     /// The SSH private key used to decrypt (and identify the current user).
-    pub ssh_key: ssh_key::PrivateKey,
+    /// `None` when the vault was opened with a read-only token (`--token`),
+    /// in which case write commands must be rejected by the caller.
+    pub ssh_key: Option<ssh_key::PrivateKey>,
     /// The decrypted entries, in insertion order.
     pub entries: Vec<(String, String)>,
-    /// Held `.vault.lock`, released on Drop.
-    _lock: Option<PathBuf>,
+    /// Held `.vault.lock`, released on Drop. `pub(crate)` so the token-loading
+    /// path in `vault_token.rs` (an extension impl) can construct a `Vault`.
+    pub(crate) _lock: Option<PathBuf>,
 }
 
 impl Drop for Vault {
@@ -135,7 +136,7 @@ impl Vault {
             Ok(Vault {
                 dir,
                 keys,
-                ssh_key,
+                ssh_key: Some(ssh_key),
                 entries: Vec::new(),
                 _lock: None,
             })
@@ -205,7 +206,7 @@ impl Vault {
         Ok(Vault {
             dir: dir.to_path_buf(),
             keys,
-            ssh_key,
+            ssh_key: Some(ssh_key),
             entries,
             _lock: None,
         })
@@ -239,12 +240,17 @@ impl Vault {
         self.entries.len() != before
     }
 
-    /// Serialize entries, re-encrypt to ALL authorized recipients, back up the
-    /// prior container, and write the new `.vault` atomically.
+    /// Serialize entries, re-encrypt to ALL authorized recipients (SSH keys
+    /// AND read-only tokens), back up the prior container, and write the new
+    /// `.vault` atomically.
     pub fn save(&mut self) -> Result<()> {
         let doc = envfmt::serialize(&self.entries);
         let plaintext = doc.as_bytes();
-        let container = crypto::encrypt_to_recipients(&self.keys.pubkey_lines(), plaintext)?;
+        let container = crypto::encrypt_to_recipients_with_tokens(
+            &self.keys.pubkey_lines(),
+            &self.keys.token_pubkeys(),
+            plaintext,
+        )?;
 
         let vpath = self.dir.join(VAULT_FILE);
         let kpath = self.dir.join(KEYS_FILE);
@@ -288,48 +294,22 @@ impl Vault {
     }
 
     /// Whether the current user's SSH key is among the authorized recipients.
+    /// Always `false` when opened with a token (no SSH key available).
     pub fn current_user_authorized(&self) -> bool {
-        let my_fp = crypto::ssh_fingerprint(&self.ssh_key);
+        let Some(sk) = &self.ssh_key else {
+            return false;
+        };
+        let my_fp = crypto::ssh_fingerprint(sk);
         self.keys.find(&my_fp).is_some()
     }
+
+    // NOTE: token methods (load_with_token / add_token / remove_token) live in
+    // `vault_token.rs` as an extension `impl Vault`, to keep this file under
+    // the 500-line guideline.
 }
 
-// ---------- file locking ----------
-
-/// Acquire an exclusive lock by atomically creating `path`. Busy-waits up to
-/// `LOCK_TIMEOUT_SECS` before giving up.
-fn acquire_lock(path: &Path) -> Result<PathBuf> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(LOCK_TIMEOUT_SECS);
-    loop {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        match opts.open(path) {
-            Ok(_) => return Ok(path.to_path_buf()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if std::time::Instant::now() > deadline {
-                    bail!(
-                        "timed out waiting for lock {} (another dotvault process may be stuck)",
-                        path.display()
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(LOCK_POLL_MS));
-            }
-            Err(e) => {
-                bail!("failed to create lock {}: {e}", path.display());
-            }
-        }
-    }
-}
-
-/// Release a previously acquired lock. Best-effort: a failure here is logged
-/// to stderr but does not propagate (the real work already succeeded).
-fn release_lock(path: &Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("warning: could not remove lock {}: {e}", path.display());
-        }
-    }
-}
+// NOTE: the file-locking helpers (acquire_lock / release_lock) live in
+// `vault_lock.rs`, to keep this file under the 500-line guideline.
 
 // ---------- home resolution ----------
 

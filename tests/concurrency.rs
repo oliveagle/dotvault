@@ -78,7 +78,7 @@ impl Iso {
 // =========================================================================
 env_test!(concurrent_set_distinct_keys_no_loss, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
     let key = iso.key_opt();
     let n = 16;
 
@@ -87,7 +87,7 @@ env_test!(concurrent_set_distinct_keys_no_loss, {
         let k = key.clone();
         handles.push(std::thread::spawn(move || {
             // Each thread adds its own unique key.
-            commands::set(&k, &format!("K{i}"), &format!("v{i}"))
+            commands::set(&k, &None, &format!("K{i}"), &format!("v{i}"))
         }));
     }
     for h in handles {
@@ -120,7 +120,7 @@ env_test!(concurrent_set_distinct_keys_no_loss, {
 // =========================================================================
 env_test!(held_lock_blocks_second_loader, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
 
     // Hold the lock for the whole test by keeping this Vault alive.
     let _held = vault::Vault::load(&iso.key_path()).unwrap();
@@ -173,7 +173,7 @@ env_test!(concurrent_init_same_project_one_winner, {
         let k = key.clone();
         let r = results.clone();
         handles.push(std::thread::spawn(move || {
-            let ok = commands::init(&k).is_ok();
+            let ok = commands::init(&k, &None).is_ok();
             r.lock().unwrap().push(ok);
         }));
     }
@@ -196,7 +196,7 @@ env_test!(concurrent_init_same_project_one_winner, {
 // =========================================================================
 env_test!(interleaved_writes_all_commit, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
     let key = iso.key_opt();
     let n = 10;
 
@@ -204,7 +204,7 @@ env_test!(interleaved_writes_all_commit, {
     for i in 0..n {
         let k = key.clone();
         handles.push(std::thread::spawn(move || {
-            commands::set(&k, &format!("T{i}"), "1").unwrap();
+            commands::set(&k, &None, &format!("T{i}"), "1").unwrap();
             // Small spin to increase interleaving odds.
             std::thread::yield_now();
         }));
@@ -223,12 +223,12 @@ env_test!(interleaved_writes_all_commit, {
 // =========================================================================
 env_test!(read_modify_write_is_atomic, {
     let iso = Iso::new();
-    commands::init(&iso.key_opt()).unwrap();
+    commands::init(&iso.key_opt(), &None).unwrap();
     let key = iso.key_path();
     let n = 8usize;
 
     // Seed one key so threads see a non-empty vault.
-    commands::set(&iso.key_opt(), "seed", "0").unwrap();
+    commands::set(&iso.key_opt(), &None, "seed", "0").unwrap();
 
     let mut handles = Vec::new();
     for t in 0..n {
