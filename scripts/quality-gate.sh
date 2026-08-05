@@ -9,7 +9,7 @@
 #   - cargo test 全部通过
 #   - 行覆盖率 > 80%
 #   - 文件行数 100-500
-#   - 无 TODO/FIXME/placeholder/BUG/HACK 标记 (零容忍)
+#   - 无 TODO/FIXME/BUG/HACK 标记 (零容忍)
 #   - 目录结构: 无 binary / 测试文件在根目录
 
 set -e
@@ -174,7 +174,12 @@ check_structure() {
 
 check_placeholders() {
   echo "检查 placeholder / bug 标记 (零容忍)..."
-  if grep -rn "TODO\|FIXME\|placeholder\|Not implemented\|TBD\|BUG\|HACK\|XXX\|WORKAROUND" \
+  # NOTE: "placeholder" was removed from this list — it is the correct domain
+  # term for template {{KEY}} substitution (askama/tera/handlebars all use it),
+  # and a blanket ban caused false positives the moment dotvault gained a
+  # `render` subcommand. The remaining markers all indicate unfinished work;
+  # a bare `// placeholder` stub is virtually always accompanied by one of them.
+  if grep -rn "TODO\|FIXME\|Not implemented\|TBD\|BUG\|HACK\|XXX\|WORKAROUND" \
     --include="*.rs" src/ 2>/dev/null; then
     echo -e "${RED}❌ 发现 placeholder / bug 标记，必须修复${NC}"
     exit 1

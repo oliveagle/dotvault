@@ -1,7 +1,9 @@
 //! Small self-contained utilities to avoid pulling in extra crates:
 //! a standard Base64 codec and std-only UTC time formatting.
 
-use anyhow::{bail, Result};
+use std::path::Path;
+
+use anyhow::{bail, Context, Result};
 
 // ============================ Base64 (standard) ============================
 
@@ -136,6 +138,43 @@ pub fn civil_from_unix(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     (y, m, d, h, mi, s)
 }
 
+// ============================ secret file output ============================
+
+/// Atomically write `data` to `dest` with restrictive permissions suitable
+/// for a rendered file that contains secrets.
+///
+/// Writes to a `.<name>.tmp` sibling, applies mode `0600` on Unix (owner
+/// read/write only — no group/other access), then renames over `dest`. On
+/// non-Unix targets the chmod step is skipped (the temp file keeps the
+/// process umask) but the atomic rename still happens.
+///
+/// This is intentionally separate from `access::write_atomic` (used for the
+/// encrypted `.vault`): that path does not harden permissions, and widening
+/// its behavior would silently change the mode of an existing vault file.
+pub fn write_secret_file(dest: &Path, data: &[u8]) -> Result<()> {
+    let dir = dest
+        .parent()
+        .with_context(|| format!("no parent dir for {}", dest.display()))?;
+    let tmp_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("dotvault");
+    let tmp = dir.join(format!(".{tmp_name}.tmp"));
+
+    std::fs::write(&tmp, data).with_context(|| format!("failed to write {}", tmp.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&tmp, perms)
+            .with_context(|| format!("failed to chmod {}", tmp.display()))?;
+    }
+
+    std::fs::rename(&tmp, dest).with_context(|| format!("failed to install {}", dest.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +219,38 @@ mod tests {
         // 2000-03-01 is a known edge (leap handling).
         let (y, m, d, _, _, _) = civil_from_unix(951_868_800);
         assert_eq!((y, m, d), (2000, 3, 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_file_sets_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("rendered.yaml");
+        write_secret_file(&dest, b"password: s3cret").unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "password: s3cret");
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "rendered secret file must be 0600, got {mode:o}"
+        );
+        // No stray temp file left behind.
+        assert!(!dir.path().join(".rendered.yaml.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_file_overwrites_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.txt");
+        // Pre-existing wide-permission file; the rewrite must tighten it.
+        std::fs::write(&dest, b"old").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_secret_file(&dest, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "overwritten file must be re-chmodded to 0600");
     }
 }

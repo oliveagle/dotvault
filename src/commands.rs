@@ -195,6 +195,55 @@ pub fn export_to<W: Write>(key: &Option<PathBuf>, out: &mut W) -> Result<()> {
     crate::export_render::render_kv(out, &sections)
 }
 
+// ---------- render ----------
+
+/// Load the vault, read the template file, and substitute every `{{KEY}}`
+/// with the matching secret value. Returns the fully-rendered document.
+///
+/// Hard-fails (no half-rendered output) when a placeholder names a secret not
+/// in the vault, or when the template has malformed `{{...}}` syntax. See
+/// `crate::template`.
+fn render_core(key: &Option<PathBuf>, template: &Path) -> Result<String> {
+    let kp = key_path(key.as_deref())?;
+    let tmpl = std::fs::read_to_string(template)
+        .with_context(|| format!("failed to read template {}", template.display()))?;
+    let v = vault::Vault::load(&kp)?;
+    crate::template::render(&tmpl, &v.entries)
+}
+
+/// Render `template` and write the result to `out`. Used by tests; the CLI
+/// entry point is `render`.
+pub fn render_to<W: Write>(key: &Option<PathBuf>, template: &Path, out: &mut W) -> Result<()> {
+    let rendered = render_core(key, template)?;
+    out.write_all(rendered.as_bytes())?;
+    Ok(())
+}
+
+/// `dotvault render`: render a template by substituting `{{KEY}}` placeholders
+/// with secret values from the vault.
+///
+/// With `out = None`, the rendered document goes to stdout (raw bytes, no
+/// appended newline) so it can be redirected. With `out = Some(path)`, it is
+/// written atomically to `path` with mode `0600` (it contains secrets) and a
+/// short confirmation is printed to stderr.
+pub fn render(key: &Option<PathBuf>, template: &Path, out: Option<&Path>) -> Result<()> {
+    match out {
+        None => {
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            render_to(key, template, &mut lock)
+        }
+        Some(dest) => {
+            let rendered = render_core(key, template)?;
+            crate::util::write_secret_file(dest, rendered.as_bytes())?;
+            eprintln!("Rendered {} → {}", template.display(), dest.display());
+            #[cfg(unix)]
+            eprintln!("  mode: 0600");
+            Ok(())
+        }
+    }
+}
+
 /// Add a recipient's public key to the vault and re-encrypt so they can
 /// decrypt. `spec` is an authorized-keys line, a `*.pub` file path, or
 /// `@file` reference.

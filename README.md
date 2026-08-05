@@ -83,6 +83,17 @@ dotvault export > .env           # write a .env file (gitignored)
 dotvault get API_TOKEN           # value only, no trailing newline
 ```
 
+Render a config template (substitute `{{KEY}}` placeholders with secrets):
+
+```sh
+# config.yaml.tmpl:
+#   database:
+#     password: {{DB_PASSWORD}}
+#   api_key: {{ API_TOKEN }}
+dotvault render config.yaml.tmpl              # → stdout
+dotvault render config.yaml.tmpl --out config.yaml   # write file, mode 0600
+```
+
 ### Sharing with a teammate
 
 ```sh
@@ -115,6 +126,7 @@ dotvault get <KEY>                     # value to stdout, no trailing newline
 dotvault rm <KEY>                      # remove a secret (errors if absent)
 dotvault list                          # secret names
 dotvault export                        # KEY=VALUE
+dotvault render <TEMPLATE> [--out F]   # substitute {{KEY}} in a template → stdout / file (0600)
 dotvault add-key <PUBKEY>              # authorize a teammate (pubkey line / *.pub / @file)
 dotvault remove-key <FP|LABEL>         # revoke a teammate (re-encrypts; see Security)
 dotvault list-keys                     # list authorized recipients (fingerprints + labels)

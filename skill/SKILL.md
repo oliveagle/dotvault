@@ -41,6 +41,10 @@ dotvault --key ~/.ssh/id_ed25519 list
 dotvault --key ~/.ssh/id_ed25519 export
 dotvault --key ~/.ssh/id_ed25519 export > .env
 
+# 用模板渲染文件(把 {{KEY}} 替换成 .vault 里的值)
+dotvault --key ~/.ssh/id_ed25519 render config.yaml.tmpl              # → stdout
+dotvault --key ~/.ssh/id_ed25519 render config.yaml.tmpl --out config.yaml  # 写文件 0600
+
 # 删除(不存在则报错)
 dotvault --key ~/.ssh/id_ed25519 rm <NAME>
 
@@ -105,7 +109,19 @@ eval "$(dotvault export | sed 's/^/export /')"
 TOKEN=$(dotvault get API_TOKEN)
 ```
 
-### 场景 3:新人加入 / 离开
+### 场景 3:渲染配置文件(模板 → 文件)
+用 `render` 把 `.vault` 里的 secret 注入到 yaml/conf/json 等模板。占位符语法
+`{{KEY}}`(也允许 `{{ KEY }}`),缺 key **直接报错**(绝不生成半成品配置)。
+```sh
+# 模板 config.yaml.tmpl:
+#   database:
+#     password: {{DB_PASSWORD}}
+#   api_key: {{ API_TOKEN }}
+dotvault render config.yaml.tmpl --out config.yaml   # 写文件,权限 0600
+dotvault render config.yaml.tmpl                     # → stdout(可重定向)
+```
+
+### 场景 4:新人加入 / 离开
 ```sh
 # 加入:管理员 add-key 后提交,新人 pull 即可解密
 dotvault add-key ~/.ssh/newguy.pub

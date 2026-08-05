@@ -49,6 +49,17 @@ enum Command {
     List,
     /// Export all secrets as `KEY=VALUE` lines to stdout.
     Export,
+    /// Render a template file: substitute `{{KEY}}` placeholders with secret
+    /// values from the vault → stdout, or `--out` FILE (mode 0600). A
+    /// placeholder for a secret not in the vault is a hard error.
+    Render {
+        /// Path to the template file (e.g. `config.yaml.tmpl`).
+        template: PathBuf,
+        /// Write the rendered output to this file (mode 0600) instead of
+        /// stdout. Useful when the result contains secrets.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
     /// Authorize a teammate: add their SSH public key and re-encrypt so they
     /// can decrypt. Accepts an authorized-keys line, a `*.pub` path, or `@file`.
     AddKey {
@@ -100,6 +111,7 @@ fn main() -> Result<()> {
         Command::Rm { key } => commands::rm(&cli.key, &key),
         Command::List => commands::list(&cli.key),
         Command::Export => commands::export(&cli.key),
+        Command::Render { template, out } => commands::render(&cli.key, &template, out.as_deref()),
         Command::AddKey { pubkey } => commands::add_key(&cli.key, &pubkey),
         Command::RemoveKey { query } => commands::remove_key(&cli.key, &query),
         Command::ListKeys => commands::list_keys(&cli.key),

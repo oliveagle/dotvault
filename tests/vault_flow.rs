@@ -384,3 +384,105 @@ env_test!(set_uses_explicit_key_flag, {
     commands::get_to(&iso.key_opt(), "FLAG_TEST", &mut out).unwrap();
     assert_eq!(String::from_utf8(out).unwrap(), "ok");
 });
+
+// ---------- render ----------
+
+/// Helper: write a template file into the current (project) dir.
+fn write_tmpl(name: &str, body: &str) -> std::path::PathBuf {
+    let path = std::env::current_dir().unwrap().join(name);
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+env_test!(render_substitutes_placeholders, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
+    commands::set(&iso.key_opt(), "API_TOKEN", "ghp_xxx").unwrap();
+
+    let tmpl = write_tmpl(
+        "config.yaml.tmpl",
+        "database:\n  password: {{DB_PASSWORD}}\napi_key: {{ API_TOKEN }}\n",
+    );
+
+    let mut out = Vec::new();
+    commands::render_to(&iso.key_opt(), &tmpl, &mut out).unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("password: s3cret"), "rendered:\n{s}");
+    assert!(s.contains("api_key: ghp_xxx"), "rendered:\n{s}");
+    // No leftover placeholders.
+    assert!(
+        !s.contains("{{"),
+        "rendered output still has placeholders:\n{s}"
+    );
+    // No trailing newline added by the command.
+    assert!(
+        s.ends_with("api_key: ghp_xxx\n"),
+        "rendered output should end with the template's own newline:\n{s}"
+    );
+});
+
+env_test!(render_to_out_file_writes_0600, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
+
+    let tmpl = write_tmpl("t.tmpl", "password: {{DB_PASSWORD}}\n");
+    let dest = std::env::current_dir().unwrap().join("rendered.yaml");
+
+    commands::render(&iso.key_opt(), &tmpl, Some(&dest)).unwrap();
+
+    let body = std::fs::read_to_string(&dest).unwrap();
+    assert_eq!(body, "password: s3cret\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "rendered --out file must be 0600, got {mode:o}"
+        );
+    }
+    // No stray temp file.
+    assert!(!std::env::current_dir()
+        .unwrap()
+        .join(".rendered.yaml.tmp")
+        .exists());
+});
+
+env_test!(render_unknown_key_errors, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    // DB_PASSWORD exists, but MISSING does not.
+    commands::set(&iso.key_opt(), "DB_PASSWORD", "s3cret").unwrap();
+
+    let tmpl = write_tmpl("t.tmpl", "x: {{MISSING}}");
+    let mut out = Vec::new();
+    let err = commands::render_to(&iso.key_opt(), &tmpl, &mut out).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("unknown secret"), "{msg}");
+    assert!(msg.contains("\"MISSING\""), "{msg}");
+    // No partial output written.
+    assert!(out.is_empty(), "render_to must not write on error");
+});
+
+env_test!(render_without_init_errors, {
+    let iso = Iso::new();
+    // No init. The template exists, but there is no vault.
+    let tmpl = write_tmpl("t.tmpl", "x: {{A}}");
+    let mut out = Vec::new();
+    let err = commands::render_to(&iso.key_opt(), &tmpl, &mut out).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no vault") || msg.contains("init"),
+        "should mention missing vault / init: {msg}"
+    );
+});
+
+env_test!(render_missing_template_file_errors, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt()).unwrap();
+    let tmpl = std::env::current_dir().unwrap().join("does_not_exist.tmpl");
+    let mut out = Vec::new();
+    assert!(commands::render_to(&iso.key_opt(), &tmpl, &mut out).is_err());
+});
