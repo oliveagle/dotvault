@@ -10,7 +10,7 @@
 //!   3. this config file
 //!   4. hardcoded default
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ impl Config {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let text = toml::to_string_pretty(self).context("failed to serialize config")?;
-        write_atomic(&path, text.as_bytes())
+        crate::util::write_atomic(&path, text.as_bytes())
     }
 
     /// Effective backup keep count: config value, else 0 (no rotation).
@@ -104,22 +104,6 @@ fn home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-}
-
-/// Atomic write: temp file in the same dir, then rename.
-fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
-    let dir = dest
-        .parent()
-        .with_context(|| format!("no parent dir for {}", dest.display()))?;
-    let tmp = dir.join(format!(
-        ".{}.tmp",
-        dest.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("dotvault")
-    ));
-    std::fs::write(&tmp, data).with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).with_context(|| format!("failed to install {}", dest.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]

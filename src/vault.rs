@@ -23,11 +23,6 @@ use crate::vault_lock::{acquire_lock, release_lock};
 
 /// The encrypted vault file in the project root.
 pub const VAULT_FILE: &str = ".vault";
-/// Companion file: agent-facing guide explaining this project uses dotvault,
-/// committed to git alongside `.vault.keys` so AI agents (Claude Code, Codex,
-/// Cursor, aider, Cline, etc.) discover it on `ls` / grep and reach for
-/// `dotvault get NAME` instead of hardcoding or asking the user.
-pub const KEYS_AGENTS_FILE: &str = ".vault.keys.AGENTS.md";
 /// The (gitignored) exclusive lock file.
 pub const LOCK_FILE: &str = ".vault.lock";
 // Lock poll interval + timeout live in `vault_lock.rs` (along with the
@@ -91,10 +86,8 @@ impl Drop for Vault {
 impl Vault {
     /// Create a new vault in the project root, seeded with the current user's
     /// public key as the sole initial recipient. Writes `.vault` (empty) +
-    /// `.vault.keys` and (unless one already exists) the agent-facing
-    /// `.vault.keys.AGENTS.md` companion that reminds AI agents to use
-    /// `dotvault get NAME` instead of hardcoding secrets. Fails if a
-    /// `.vault` already exists.
+    /// `.vault.keys` (whose top `//` comment guides AI agents to
+    /// `dotvault --help`). Fails if a `.vault` already exists.
     ///
     /// `pubkey_line` is the authorized-keys line for the initial recipient
     /// (e.g. read from `~/.ssh/id_ed25519.pub`).
@@ -120,19 +113,8 @@ impl Vault {
             let keys = VaultKeys::new(initial, &now);
             let plaintext = envfmt::serialize(&Vec::new()).into_bytes();
             let container = crypto::encrypt_to_recipients(&keys.pubkey_lines(), &plaintext)?;
-            access::write_atomic(&vpath, &container)?;
+            crate::util::write_atomic(&vpath, &container)?;
             access::save_keys(&kpath, &keys)?;
-            // Drop the agent-facing companion note next to `.vault.keys` so any
-            // AI agent that lands in this project via `ls`/grep/git ls-files
-            // immediately learns that secrets live in `.vault` and should be
-            // fetched via `dotvault get NAME`. Idempotent: never overwrites an
-            // existing file (project owners may have edited it for their team).
-            let note_path = dir.join(KEYS_AGENTS_FILE);
-            if !note_path.exists() {
-                let embedded = include_str!("../.vault.keys.AGENTS.md");
-                std::fs::write(&note_path, embedded.as_bytes())
-                    .with_context(|| format!("failed to write {}", note_path.display()))?;
-            }
             Ok(Vault {
                 dir,
                 keys,
@@ -259,7 +241,7 @@ impl Vault {
             crate::backup::backup_container(&vpath, &self.dir)
                 .context("failed to back up vault")?;
         }
-        access::write_atomic(&vpath, &container)?;
+        crate::util::write_atomic(&vpath, &container)?;
         access::save_keys(&kpath, &self.keys)?;
         Ok(())
     }
@@ -371,73 +353,28 @@ mod tests {
         std::env::remove_var("DOTVAULT_VAULT_DIR");
     }
 
-    /// `init` must drop `.vault.keys.AGENTS.md` next to `.vault.keys` so any
-    /// agent that lands in the project via `ls` immediately learns secrets
-    /// live in `.vault` and should be fetched via `dotvault get NAME`.
+    /// `init` writes a `.vault.keys` whose top `//` comment guides AI agents to
+    /// `dotvault --help` (replacing the old standalone `.vault.keys.AGENTS.md`).
     #[test]
-    fn init_writes_agent_companion_note() {
+    fn init_writes_keys_with_agent_guidance_comment() {
         let _guard = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let project = tempfile::tempdir().expect("project tempdir");
         std::env::set_var("DOTVAULT_VAULT_DIR", project.path());
         let (keydir, key_path, pub_line) = make_test_key();
-        // hold keydir alive until end of test so the test's private key file
-        // is still readable when the Vault::init body reads it
         let _keep_keydir = keydir;
 
         let _v = Vault::init(&key_path, &pub_line).expect("init");
 
-        let note = project.path().join(KEYS_AGENTS_FILE);
+        let kpath = project.path().join(crate::access::KEYS_FILE);
+        let body = std::fs::read_to_string(&kpath).expect("read .vault.keys");
         assert!(
-            note.is_file(),
-            "expected companion note at {} after init",
-            note.display()
+            body.starts_with("//"),
+            ".vault.keys should start with the agent-guidance // comment"
         );
-        let body = std::fs::read_to_string(&note).expect("read note");
-        assert!(!body.trim().is_empty(), "companion note must not be empty");
-        // The note MUST mention `dotvault get` so an agent that skims it
-        // immediately sees the canonical command.
         assert!(
-            body.contains("dotvault get"),
-            "companion note must mention `dotvault get` (got first 200 chars: {:?})",
-            &body[..body.len().min(200)]
-        );
-        std::env::remove_var("DOTVAULT_VAULT_DIR");
-    }
-
-    /// Re-running `init` must fail (vault already exists) and must NOT
-    /// overwrite an owner-customized companion note — owners may have
-    /// rewritten it for their team and we should not clobber their edits.
-    #[test]
-    fn init_does_not_overwrite_existing_companion_note() {
-        let _guard = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::env::set_var("DOTVAULT_VAULT_DIR", project.path());
-        let (keydir, key_path, pub_line) = make_test_key();
-        let _keep_keydir = keydir;
-
-        let first = Vault::init(&key_path, &pub_line).expect("first init");
-        // Drop the Vault explicitly to release its `.vault.lock` BEFORE the
-        // second init call. Without this, the second init's `acquire_lock`
-        // would spin for 30s waiting for the lock to clear. (Rust's `let _v`
-        // is NOT immediate-drop; the binding lives until end of scope.)
-        drop(first);
-
-        // Owner customizes the note.
-        let note = project.path().join(KEYS_AGENTS_FILE);
-        std::fs::write(&note, "# custom owner note\n").expect("write custom note");
-
-        // Re-init must fail because the vault already exists. The "no
-        // overwrite on existing file" guard in `Vault::init` is defense-
-        // in-depth — but in practice we never reach it because the existing-
-        // vault check bails first.
-        let again = Vault::init(&key_path, &pub_line);
-        assert!(again.is_err(), "re-init must fail when .vault exists");
-        let body = std::fs::read_to_string(&note).expect("read note");
-        assert_eq!(
-            body, "# custom owner note\n",
-            "owner-customized companion note must survive re-init attempts"
+            body.contains("dotvault --help"),
+            "guidance comment should point agents to `dotvault --help`"
         );
         std::env::remove_var("DOTVAULT_VAULT_DIR");
     }

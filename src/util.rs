@@ -138,6 +138,27 @@ pub fn civil_from_unix(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     (y, m, d, h, mi, s)
 }
 
+// ============================ atomic file output ============================
+
+/// Write `data` to `dest` atomically via a temp file + rename (no permission
+/// hardening — the result keeps the process umask). Used for the encrypted
+/// `.vault` and `.vault.keys`. For files that contain rendered secrets and need
+/// mode `0600`, use [`write_secret_file`] instead.
+pub fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
+    let dir = dest
+        .parent()
+        .with_context(|| format!("no parent dir for {}", dest.display()))?;
+    let tmp = dir.join(format!(
+        ".{}.tmp",
+        dest.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("dotvault")
+    ));
+    std::fs::write(&tmp, data).with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, dest).with_context(|| format!("failed to install {}", dest.display()))?;
+    Ok(())
+}
+
 // ============================ secret file output ============================
 
 /// Atomically write `data` to `dest` with restrictive permissions suitable
@@ -148,9 +169,10 @@ pub fn civil_from_unix(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 /// non-Unix targets the chmod step is skipped (the temp file keeps the
 /// process umask) but the atomic rename still happens.
 ///
-/// This is intentionally separate from `access::write_atomic` (used for the
-/// encrypted `.vault`): that path does not harden permissions, and widening
-/// its behavior would silently change the mode of an existing vault file.
+/// This is intentionally separate from [`write_atomic`] (used for the
+/// encrypted `.vault` and `.vault.keys`): that path does not harden
+/// permissions, and widening its behavior would silently change the mode of
+/// an existing vault file.
 pub fn write_secret_file(dest: &Path, data: &[u8]) -> Result<()> {
     let dir = dest
         .parent()

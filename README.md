@@ -46,7 +46,7 @@ Then add `~/.dotvault/bin` to your `PATH` (one-time, pick your shell):
 ```sh
 echo 'export PATH="$HOME/.dotvault/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
 source ~/.zshrc
-dotvault install          # one-time: create ~/.dotvault/ + default config + skill
+dotvault install          # one-time: create ~/.dotvault/ + default config
 ```
 
 **From source (requires Rust toolchain):**
@@ -252,8 +252,7 @@ errors with the lock path so you can `rm` it.
 ```
 project/
   .vault                  # age container, encrypted to all authorized keys (committed)
-  .vault.keys             # authorized-public-key registry, JSON (committed)
-  .vault.keys.AGENTS.md   # agent-facing guide (committed, plain markdown, no secrets)
+  .vault.keys             # authorized-key registry, JSON + top // agent-guidance comment (committed)
   .vault.lock             # exclusive lock (gitignored, transient)
 
 ~/.dotvault/              # global, no secrets
@@ -265,18 +264,14 @@ project/
 Each successful write backs up the previous `.vault` before installing the new
 one (atomic temp + rename).
 
-### `.vault.keys.AGENTS.md` — for AI agents, not humans
+### AI agent discovery
 
-When you run `dotvault init` we drop a small companion markdown file
-(`.vault.keys.AGENTS.md`) next to `.vault.keys`. It is plain text, contains
-**no secrets**, and is committed to git. Its job is to remind AI agents
-(Claude Code, Codex, Cursor, aider, Cline, gemini-cli, etc.) that this
-project uses dotvault — so the next time an agent needs a GitHub token, an
-OpenAI key, a DB password, or any other credential, it reaches for
-`dotvault get NAME` instead of asking you to paste the value or hardcoding
-it. The note is **never overwritten** on re-init, so you can edit it for
-your team (e.g. add a project-specific section). Re-running `dotvault
-install` does not touch it either.
+`.vault.keys` starts with a short `//` comment (stripped before JSON parsing)
+pointing any AI agent (Claude Code, Codex, Cursor, aider, etc.) that reads the
+file to `dotvault --help` for the full command reference. So an agent landing
+in the project learns to fetch secrets via `dotvault get NAME` instead of
+hardcoding them — no separate companion file or installed skill needed. The
+command's own `--help` is the single source of truth, so it can never go stale.
 
 ## Migrating from v0.3 (centralized namespaces)
 

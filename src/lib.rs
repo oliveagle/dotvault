@@ -17,7 +17,6 @@ pub mod config;
 pub mod crypto;
 pub mod envfmt;
 pub mod export_render;
-pub mod skill;
 pub mod template;
 pub mod update;
 pub mod util;

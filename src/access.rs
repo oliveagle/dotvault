@@ -138,9 +138,22 @@ impl VaultKeys {
         self.keys.is_empty()
     }
 
-    // NOTE: token-handling methods (find_token / add_token / remove_token /
-    // token_count / token_pubkeys) live in `access_token.rs` as an extension
-    // `impl VaultKeys`, to keep this file under the 500-line guideline.
+    // Token methods (find/add/remove_token, token_count, token_pubkeys) live
+    // in `access_token.rs` (extension impl) to keep this file ≤500 lines.
+}
+
+/// Strip JSON5-style leading `//` line comments so `load_keys` can parse a
+/// `.vault.keys` (which starts with an agent-guidance comment) with strict
+/// serde_json. Only full-line comments are stripped — `//` inside a JSON
+/// string value is preserved (those lines don't start with `//`).
+fn strip_line_comments(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Load and parse a `.vault.keys` file from `path`. Validates that every
@@ -149,7 +162,9 @@ impl VaultKeys {
 pub fn load_keys(path: &Path) -> Result<VaultKeys> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let keys: VaultKeys = serde_json::from_str(&text)
+    // Tolerate the leading `//` agent-guidance comment (see save_keys).
+    let body = strip_line_comments(&text);
+    let keys: VaultKeys = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
     if keys.keys.is_empty() {
         bail!(
@@ -157,8 +172,7 @@ pub fn load_keys(path: &Path) -> Result<VaultKeys> {
             path.display()
         );
     }
-    // Validate each public key parses, so a hand-edited/merged-corrupt
-    // .vault.keys reports the offending key here, not deep in encryption.
+    // Validate each pubkey parses (fail fast here, not deep in encryption).
     for (i, k) in keys.keys.iter().enumerate() {
         crypto::parse_pubkey_line(&k.public_key).map_err(|e| {
             anyhow::anyhow!(
@@ -169,7 +183,7 @@ pub fn load_keys(path: &Path) -> Result<VaultKeys> {
             )
         })?;
     }
-    // Likewise validate every token public key parses as an age1... recipient.
+    // Same for token pubkeys (must parse as age1... recipients).
     for (i, t) in keys.tokens.iter().enumerate() {
         crypto::parse_token_pubkey(&t.public_key).map_err(|e| {
             anyhow::anyhow!(
@@ -183,11 +197,22 @@ pub fn load_keys(path: &Path) -> Result<VaultKeys> {
     Ok(keys)
 }
 
-/// Serialize and atomically write a `VaultKeys` registry to `path`.
+/// The agent-guidance header prepended to every `.vault.keys`. JSON5-style
+/// `//` comments (stripped by `strip_line_comments` before serde_json). Replaces
+/// the old standalone `.vault.keys.AGENTS.md`.
+const KEYS_HEADER: &str = "\
+// This project uses dotvault for encrypted secrets (.vault). This file lists
+// who can decrypt it (SSH keys + read-only tokens). Run `dotvault --help` for
+// the command reference — never hardcode secrets. Fetch: dotvault get <NAME>
+";
+
+/// Serialize and atomically write a `VaultKeys` registry to `path`, with the
+/// agent-guidance header prepended.
 pub fn save_keys(path: &Path, keys: &VaultKeys) -> Result<()> {
     let json = serde_json::to_string_pretty(keys)
         .map_err(|e| anyhow::anyhow!("failed to serialize {}: {e}", path.display()))?;
-    write_atomic(path, json.as_bytes())
+    let body = format!("{KEYS_HEADER}{json}");
+    crate::util::write_atomic(path, body.as_bytes())
 }
 
 /// Build an `AuthorizedKey` from a public-key line (authorized-keys format
@@ -247,55 +272,6 @@ pub fn resolve_pubkey_spec(spec: &str) -> Result<String> {
     Ok(spec.to_string())
 }
 
-/// Validate a label/name used for filesystem paths (e.g. backup filenames).
-/// Strict: lowercase alphanumeric, digits, `-`, `_`; must start with alnum;
-/// 1–63 chars. Rejects `.`, `..`, `/`, `\`, uppercase, spaces. This is the
-/// only defense against path traversal in backup naming.
-pub fn validate_label(label: &str) -> Result<()> {
-    if label.is_empty() {
-        bail!("label is empty");
-    }
-    if label.len() > 63 {
-        bail!(
-            "label too long ({} chars, max 63): {:?}",
-            label.len(),
-            label
-        );
-    }
-    let first = label.as_bytes()[0];
-    if !first.is_ascii_alphanumeric() {
-        bail!(
-            "label must start with alphanumeric, got {:?}",
-            first as char
-        );
-    }
-    for c in label.chars() {
-        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
-            bail!(
-                "label contains invalid character {:?} (only a-z, 0-9, -, _ allowed)",
-                c
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Write `data` to `dest` atomically via a temp file + rename.
-pub fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
-    let dir = dest
-        .parent()
-        .with_context(|| format!("no parent dir for {}", dest.display()))?;
-    let tmp = dir.join(format!(
-        ".{}.tmp",
-        dest.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("dotvault")
-    ));
-    std::fs::write(&tmp, data).with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).with_context(|| format!("failed to install {}", dest.display()))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,15 +329,6 @@ mod tests {
         vk.add(ak2, now);
         assert!(vk.remove(&label2, now).is_some());
         assert!(vk.is_empty());
-    }
-
-    #[test]
-    fn label_validation() {
-        assert!(validate_label("good-ns").is_ok());
-        assert!(validate_label("../escape").is_err());
-        assert!(validate_label("a/b").is_err());
-        assert!(validate_label("").is_err());
-        assert!(validate_label("BAD UPPER").is_err());
     }
 
     #[test]
@@ -467,5 +434,31 @@ mod tests {
             msg.contains("token #1") && msg.contains("broken"),
             "should flag the bad token, got: {msg}"
         );
+    }
+
+    #[test]
+    fn keys_roundtrip_with_comment_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".vault.keys");
+        let mut vk = VaultKeys::empty("2026-01-01T00:00:00Z");
+        vk.add(
+            authorized_key_from_pubkey(&gen_pubkey()).unwrap(),
+            "2026-01-01T00:00:00Z",
+        );
+        save_keys(&path, &vk).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.starts_with("//"),
+            "saved file should start with // header"
+        );
+        assert_eq!(load_keys(&path).unwrap().len(), 1);
+
+        // strip_line_comments must drop full-line // comments but preserve //
+        // inside JSON string values (such lines don't start with //).
+        let mixed = "// header\n{\n  \"x\": \"// in-string, kept\"\n}\n// trailing\n";
+        let stripped = strip_line_comments(mixed);
+        assert!(!stripped.contains("header") && !stripped.contains("trailing"));
+        assert!(stripped.contains("\"// in-string, kept\""));
     }
 }

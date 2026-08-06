@@ -91,7 +91,7 @@ pub fn init(key: &Option<PathBuf>, token: &Option<String>) -> Result<()> {
 }
 
 /// `dotvault install` — global environment setup: create `~/.dotvault` +
-/// default config + install the agent skill. Idempotent; no secrets stored.
+/// default config. Idempotent; no secrets stored.
 pub fn install(key: &Option<PathBuf>) -> Result<()> {
     println!("dotvault install — environment setup\n");
 
@@ -126,9 +126,6 @@ pub fn install(key: &Option<PathBuf>) -> Result<()> {
         println!("  no vault in this project");
         println!("  hint: run `dotvault init` to create one");
     }
-
-    println!("\n[skill]");
-    crate::skill::install(&global_dir)?;
 
     println!("\nDone. Next: `dotvault init` then `dotvault set NAME VALUE`.");
     let _ = key;
