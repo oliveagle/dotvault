@@ -22,7 +22,7 @@ fn render_core(key: &Option<PathBuf>, token: &Option<String>, template: &Path) -
     let tmpl = std::fs::read_to_string(template)
         .with_context(|| format!("failed to read template {}", template.display()))?;
     let v = load_vault(key, token)?;
-    crate::template::render(&tmpl, &v.entries)
+    crate::template::render(&tmpl, &v.doc.kv_pairs())
 }
 
 /// Render `template` and write the result to `out`. Used by tests; the CLI

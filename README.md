@@ -146,6 +146,46 @@ SSH key: revoke it and **rotate** any sensitive secret values. The token
 secret is shown **once** at creation and is never stored; only its public key
 (`age1...`) lives in `.vault.keys`.
 
+### Versioning, diff & merge (git conflicts on `.vault`)
+
+`.vault` is an encrypted binary, so git can't diff or merge it. dotvault
+solves this at the entry level: every entry carries `modified_at`, a
+`sha256:` content hash and the writer's key fingerprint (`actor`), and every
+superseded version (overwritten / deleted / lost a merge) is archived in an
+in-vault **history** that travels with the repo. History is rotated on every
+save — default **365 days**, configurable (`0` = forever):
+
+```sh
+dotvault config --set-history-days 365
+```
+
+Resolving a git conflict on `.vault`:
+
+```sh
+git show :2:.vault > .vault.ours     # our stage
+git show :3:.vault > .vault.theirs   # their stage
+git show :1:.vault > .vault.base     # merge base (optional → exact 3-way)
+
+dotvault diff .vault.ours .vault.theirs          # per-key add/remove/change (hashes + times, never values)
+dotvault merge .vault.ours .vault.theirs \
+  --base .vault.base -o .vault                   # single-sided changes win; divergent keys → --strategy
+```
+
+`merge` strategies for keys changed on **both** sides: `newest` (default —
+the later `modified_at` wins), `ours`, `theirs`. Losing values are archived
+into history, so a merge never silently destroys a secret. Recovering a
+clobbered key:
+
+```sh
+dotvault history API_TOKEN                     # when each version lived, its hash, who wrote it
+dotvault restore API_TOKEN 1a2b3c4d            # bring that version back (current value is archived)
+```
+
+Note: since v0.8 the plaintext inside `.vault` is a versioned TOML document
+(older vaults in bare `.env` format still load and are migrated on the next
+write) — **upgrade all teammates to ≥0.8 before anyone writes**, older
+binaries misread the new format.
+
 ## Commands
 
 ```
@@ -163,6 +203,10 @@ dotvault add-token <LABEL>             # create a read-only CI token (prints sec
 dotvault list-tokens                   # list read-only tokens (age1... public keys)
 dotvault revoke-token <LABEL|age1...>  # revoke a token (re-encrypts; see Security)
 dotvault list-keys                     # list authorized recipients + tokens
+dotvault diff <A> <B>                  # entry-level diff of two vault files (no values shown)
+dotvault merge <OURS> <THEIRS> -o F    # entry-level merge of a conflict (--strategy newest|ours|theirs)
+dotvault history [KEY]                 # list superseded versions (time + hash + actor, no values)
+dotvault restore <KEY> <HASH>          # recover a historical version by hash prefix
 dotvault doctor                        # verify vault + list authorized keys
 dotvault version                       # print version + git hash + build details
 dotvault config [--set-key ...]        # show/set ~/.dotvault/config.toml

@@ -15,6 +15,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Default retention for in-vault history records: 365 days (1 year).
+pub const DEFAULT_HISTORY_DAYS: u64 = 365;
+
 /// Persisted global config. Every field is optional so an absent key in the
 /// file means "not configured" rather than "empty string".
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -25,6 +28,9 @@ pub struct Config {
     pub backup_dir: Option<String>,
     /// How many recent backups to keep; 0 = unlimited (no rotation).
     pub backup_keep: Option<usize>,
+    /// How many days of in-vault history to keep (superseded/deleted/merged
+    /// versions inside `.vault`); 0 = keep forever. Default: 365.
+    pub history_days: Option<u64>,
 }
 
 impl Config {
@@ -69,6 +75,12 @@ impl Config {
     /// This is the single source of truth for rotation behavior.
     pub fn backup_keep(&self) -> usize {
         self.backup_keep.unwrap_or(0)
+    }
+
+    /// Effective history retention in days: config value, else the 1-year
+    /// default. 0 disables rotation (history is kept forever).
+    pub fn history_days(&self) -> u64 {
+        self.history_days.unwrap_or(DEFAULT_HISTORY_DAYS)
     }
 
     /// Effective key path (tilde-expanded), or `None` if unset.
@@ -174,6 +186,7 @@ mod tests {
             key: Some("~/ssh/key".into()),
             backup_dir: Some("~/.dotvault/backups".into()),
             backup_keep: Some(25),
+            history_days: None,
         };
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
@@ -199,6 +212,7 @@ mod tests {
             key: Some("~/.ssh/id_rsa".into()),
             backup_dir: Some("~/.dotvault/backups".into()),
             backup_keep: Some(10),
+            history_days: None,
         };
         c.save().unwrap();
         assert!(path.exists(), "save should create the file");

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use dotvault::{commands, commands_auth, commands_render};
+use dotvault::{commands, commands_auth, commands_history, commands_render};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -108,6 +108,56 @@ enum Command {
         /// Set how many backups to keep (0 = unlimited).
         #[arg(long, value_name = "N")]
         set_backup_keep: Option<usize>,
+        /// Set how many days of in-vault history to keep (0 = forever).
+        #[arg(long, value_name = "DAYS")]
+        set_history_days: Option<u64>,
+    },
+    /// Compare the entries of two vault files (e.g. both sides of a git
+    /// conflict: `git show :2:.vault > ours; git show :3:.vault > theirs`).
+    /// Prints per-key add/remove/change with hashes + timestamps — never the
+    /// secret values. Exits 1 when the docs differ (like diff(1)).
+    Diff {
+        /// First vault file (the "old"/ours side).
+        a: PathBuf,
+        /// Second vault file (the "new"/theirs side).
+        b: PathBuf,
+    },
+    /// Entry-level merge of two vault files into a new encrypted `.vault`
+    /// (writes to --out). Resolves a git conflict: single-sided changes win,
+    /// divergent keys follow --strategy (default: newest by modified_at).
+    /// Losers are archived into history, so nothing is silently lost.
+    /// Requires an SSH key (it writes the vault).
+    Merge {
+        /// Our side of the conflict (`git show :2:.vault > ours`).
+        ours: PathBuf,
+        /// Their side (`git show :3:.vault > theirs`).
+        theirs: PathBuf,
+        /// Optional merge base (`git show :1:.vault > base`) for exact 3-way
+        /// merge semantics.
+        #[arg(long)]
+        base: Option<PathBuf>,
+        /// Divergent-key strategy: newest (default) | ours | theirs.
+        #[arg(long, default_value = "newest")]
+        strategy: String,
+        /// Output path for the merged, re-encrypted vault.
+        #[arg(long, short = 'o', value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// List superseded versions (the in-vault history): when each version was
+    /// written/superseded, its hash, and by whom. Values are never shown.
+    /// Optionally filter to one key.
+    History {
+        /// Only show history for this key (omit to list all).
+        key: Option<String>,
+    },
+    /// Recover a historical value: restore KEY to the version whose hash
+    /// matches HASH_PREFIX (from `dotvault history KEY`). Archives the current
+    /// value first. Requires an SSH key.
+    Restore {
+        /// The key to restore.
+        key: String,
+        /// Hash prefix of the historical version (see `dotvault history KEY`).
+        hash: String,
     },
     /// Verify the project vault integrity + list authorized keys.
     Doctor,
@@ -158,7 +208,33 @@ fn main() -> Result<()> {
             set_key,
             set_backup_dir,
             set_backup_keep,
-        } => commands::config(&set_key, &set_backup_dir, &set_backup_keep),
+            set_history_days,
+        } => commands::config(
+            &set_key,
+            &set_backup_dir,
+            &set_backup_keep,
+            &set_history_days,
+        ),
+        Command::Diff { a, b } => commands_history::diff(&cli.key, &cli.token, &a, &b),
+        Command::Merge {
+            ours,
+            theirs,
+            base,
+            strategy,
+            out,
+        } => commands_history::merge(
+            &cli.key,
+            &cli.token,
+            &ours,
+            &theirs,
+            base.as_deref(),
+            &strategy,
+            &out,
+        ),
+        Command::History { key } => commands_history::history(&cli.key, &cli.token, &key),
+        Command::Restore { key, hash } => {
+            commands_history::restore(&cli.key, &cli.token, &key, &hash)
+        }
         Command::Doctor => commands::doctor(&cli.key, &cli.token),
         Command::Version => commands::version(),
     }

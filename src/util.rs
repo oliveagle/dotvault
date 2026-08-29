@@ -138,6 +138,44 @@ pub fn civil_from_unix(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     (y, m, d, h, mi, s)
 }
 
+/// Parse a strict `YYYY-MM-DDTHH:MM:SSZ` timestamp (the format `now_iso`
+/// emits) into Unix seconds. Returns `None` on any deviation — callers use
+/// this for history rotation, where an unparseable stamp must fail safe
+/// (keep the record) rather than guess.
+pub fn parse_iso_to_unix(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date, time) = s.split_once('T')?;
+    let time = time.strip_suffix('Z')?;
+    let (y, md) = date.split_once('-')?;
+    let (m, d) = md.split_once('-')?;
+    let (h, ms) = time.split_once(':')?;
+    let (mi, sec) = ms.split_once(':')?;
+    let (y, m, d, h, mi, sec) = (
+        y.parse::<i64>().ok()?,
+        m.parse::<i64>().ok()?,
+        d.parse::<i64>().ok()?,
+        h.parse::<i64>().ok()?,
+        mi.parse::<i64>().ok()?,
+        sec.parse::<i64>().ok()?,
+    );
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    Some(days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + sec)
+}
+
+/// Unix days from a civil (proleptic Gregorian) date — the inverse of the
+/// era arithmetic in [`civil_from_unix`], per Howard Hinnant's algorithm.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 // ============================ atomic file output ============================
 
 /// Write `data` to `dest` atomically via a temp file + rename (no permission
@@ -241,6 +279,23 @@ mod tests {
         // 2000-03-01 is a known edge (leap handling).
         let (y, m, d, _, _, _) = civil_from_unix(951_868_800);
         assert_eq!((y, m, d), (2000, 3, 1));
+    }
+
+    #[test]
+    fn iso_roundtrip_and_rejects() {
+        // now_iso format round-trips through parse_iso_to_unix.
+        let secs: u64 = 1_754_500_000;
+        assert_eq!(parse_iso_to_unix(&format_unix_utc(secs)), Some(secs as i64));
+        // Known instant.
+        assert_eq!(
+            parse_iso_to_unix("2021-01-01T00:00:00Z"),
+            Some(1_609_459_200)
+        );
+        // Malformed inputs are rejected (fail-safe: None, not a guess).
+        assert_eq!(parse_iso_to_unix("not-a-date"), None);
+        assert_eq!(parse_iso_to_unix("2021-01-01"), None);
+        assert_eq!(parse_iso_to_unix("2021-13-01T00:00:00Z"), None);
+        assert_eq!(parse_iso_to_unix(""), None);
     }
 
     #[cfg(unix)]

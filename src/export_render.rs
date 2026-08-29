@@ -30,12 +30,10 @@ pub fn collect_sections(vault: &Vault) -> Sections {
         .unwrap_or("project")
         .to_string();
     let entries: Vec<Entry> = vault
-        .entries
-        .iter()
-        .map(|(k, v)| Entry {
-            key: k.clone(),
-            value: v.clone(),
-        })
+        .doc
+        .kv_pairs()
+        .into_iter()
+        .map(|(key, value)| Entry { key, value })
         .collect();
     if entries.is_empty() {
         Vec::new()

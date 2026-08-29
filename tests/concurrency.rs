@@ -96,7 +96,7 @@ env_test!(concurrent_set_distinct_keys_no_loss, {
 
     // Reload and verify ALL n keys are present (no lost updates).
     let v = vault::Vault::load(&iso.key_path()).unwrap();
-    let mut names: Vec<String> = v.entries.iter().map(|(k, _)| k.clone()).collect();
+    let mut names: Vec<String> = v.doc.entries.iter().map(|e| e.key.clone()).collect();
     names.sort();
     assert_eq!(
         names.len(),
@@ -213,7 +213,7 @@ env_test!(interleaved_writes_all_commit, {
         h.join().unwrap();
     }
     let v = vault::Vault::load(&iso.key_path()).unwrap();
-    assert_eq!(v.entries.len(), n, "expected {n} committed writes");
+    assert_eq!(v.doc.entries.len(), n, "expected {n} committed writes");
 });
 
 // =========================================================================
@@ -248,9 +248,9 @@ env_test!(read_modify_write_is_atomic, {
     let v = vault::Vault::load(&iso.key_path()).unwrap();
     // seed + n writer keys.
     assert_eq!(
-        v.entries.len(),
+        v.doc.entries.len(),
         1 + n,
         "lost update: read-modify-write was not atomic, got {} entries",
-        v.entries.len()
+        v.doc.entries.len()
     );
 });

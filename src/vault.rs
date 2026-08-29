@@ -18,8 +18,8 @@ use anyhow::{bail, Context, Result};
 
 use crate::access::{self, AuthorizedKey, VaultKeys, KEYS_FILE};
 use crate::crypto;
-use crate::envfmt;
 use crate::vault_lock::{acquire_lock, release_lock};
+use crate::vaultdoc;
 
 /// The encrypted vault file in the project root.
 pub const VAULT_FILE: &str = ".vault";
@@ -68,8 +68,9 @@ pub struct Vault {
     /// `None` when the vault was opened with a read-only token (`--token`),
     /// in which case write commands must be rejected by the caller.
     pub ssh_key: Option<ssh_key::PrivateKey>,
-    /// The decrypted entries, in insertion order.
-    pub entries: Vec<(String, String)>,
+    /// The decrypted document: live entries (with modified_at/hash/actor
+    /// metadata) plus the recoverable history of superseded versions.
+    pub doc: vaultdoc::VaultDoc,
     /// Held `.vault.lock`, released on Drop. `pub(crate)` so the token-loading
     /// path in `vault_token.rs` (an extension impl) can construct a `Vault`.
     pub(crate) _lock: Option<PathBuf>,
@@ -111,7 +112,7 @@ impl Vault {
             let initial = access::authorized_key_from_line(pubkey_line)?;
             let now = crate::util::now_iso();
             let keys = VaultKeys::new(initial, &now);
-            let plaintext = envfmt::serialize(&Vec::new()).into_bytes();
+            let plaintext = vaultdoc::VaultDoc::default().to_bytes()?;
             let container = crypto::encrypt_to_recipients(&keys.pubkey_lines(), &plaintext)?;
             crate::util::write_atomic(&vpath, &container)?;
             access::save_keys(&kpath, &keys)?;
@@ -119,7 +120,7 @@ impl Vault {
                 dir,
                 keys,
                 ssh_key: Some(ssh_key),
-                entries: Vec::new(),
+                doc: vaultdoc::VaultDoc::default(),
                 _lock: None,
             })
         })();
@@ -182,56 +183,58 @@ impl Vault {
             std::fs::read(&vpath).with_context(|| format!("failed to read {}", vpath.display()))?;
         let ssh_key = crypto::load_private_key(ssh_key_path)?;
         let plaintext = crypto::decrypt_with_key(&ssh_key, &container)?;
-        let entries = envfmt::parse(&String::from_utf8_lossy(&plaintext))
-            .context("vault document is corrupted (failed to parse)")?;
+        // v2 TOML if the magic line is present; legacy `.env` otherwise
+        // (auto-migrated to v2 on the next save).
+        let doc = vaultdoc::VaultDoc::from_bytes(&plaintext, &crate::util::now_iso())?;
         let keys = access::load_keys(&kpath)?;
         Ok(Vault {
             dir: dir.to_path_buf(),
             keys,
             ssh_key: Some(ssh_key),
-            entries,
+            doc,
             _lock: None,
         })
     }
 
+    /// Fingerprint of the SSH key behind this session, stamped onto entry
+    /// metadata as the `actor` (audit trail). `None` in token mode.
+    fn actor(&self) -> Option<String> {
+        self.ssh_key.as_ref().map(crypto::ssh_fingerprint)
+    }
+
     /// Insert a NEW entry. Fails if the key already exists.
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
-        if self.entries.iter().any(|(k, _)| k == key) {
-            bail!(
-                "secret {:?} already exists; run `dotvault rm {}` first to replace it",
-                key,
-                key
-            );
-        }
-        self.entries.push((key.to_string(), value.to_string()));
-        Ok(())
+        let actor = self.actor();
+        self.doc
+            .insert(key, value, &crate::util::now_iso(), actor.as_deref())
     }
 
     /// Get a value by key.
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+        self.doc.get(key).map(|e| e.value.as_str())
     }
 
-    /// Remove an entry. Returns true if it was present.
+    /// Remove an entry, archiving its current version into history
+    /// (`reason = "delete"`). Returns true if it was present.
     pub fn remove(&mut self, key: &str) -> bool {
-        let before = self.entries.len();
-        self.entries.retain(|(k, _)| k != key);
-        self.entries.len() != before
+        let actor = self.actor();
+        self.doc
+            .remove(key, &crate::util::now_iso(), actor.as_deref())
     }
 
-    /// Serialize entries, re-encrypt to ALL authorized recipients (SSH keys
-    /// AND read-only tokens), back up the prior container, and write the new
-    /// `.vault` atomically.
+    /// Serialize the document (pruning history past the configured retention),
+    /// re-encrypt to ALL authorized recipients (SSH keys AND read-only tokens),
+    /// back up the prior container, and write the new `.vault` atomically.
     pub fn save(&mut self) -> Result<()> {
-        let doc = envfmt::serialize(&self.entries);
-        let plaintext = doc.as_bytes();
+        let keep_days = crate::config::Config::load()
+            .map(|c| c.history_days())
+            .unwrap_or(crate::config::DEFAULT_HISTORY_DAYS);
+        self.doc.prune_history(keep_days, &crate::util::now_iso());
+        let plaintext = self.doc.to_bytes()?;
         let container = crypto::encrypt_to_recipients_with_tokens(
             &self.keys.pubkey_lines(),
             &self.keys.token_pubkeys(),
-            plaintext,
+            &plaintext,
         )?;
 
         let vpath = self.dir.join(VAULT_FILE);

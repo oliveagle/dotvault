@@ -109,6 +109,7 @@ pub fn install(key: &Option<PathBuf>) -> Result<()> {
             key: Some("~/.ssh/id_ed25519".to_string()),
             backup_dir: Some("~/.dotvault/backups".to_string()),
             backup_keep: Some(50),
+            history_days: Some(crate::config::DEFAULT_HISTORY_DAYS),
         };
         cfg.save()?;
         println!("  created with defaults: {}", cfg_path.display());
@@ -325,7 +326,8 @@ pub fn doctor_to<W: Write>(
         "vault           : {}",
         v.dir.join(vault::VAULT_FILE).display()
     )?;
-    writeln!(out, "entries         : {}", v.entries.len())?;
+    writeln!(out, "entries         : {}", v.doc.entries.len())?;
+    writeln!(out, "history records : {}", v.doc.history.len())?;
     writeln!(out, "authorized keys : {}", v.keys.len())?;
     for k in &v.keys.keys {
         let mark = if my_fp.as_deref() == Some(k.fingerprint.as_str()) {
@@ -349,6 +351,7 @@ pub fn config(
     set_key: &Option<String>,
     set_backup_dir: &Option<String>,
     set_backup_keep: &Option<usize>,
+    set_history_days: &Option<u64>,
 ) -> Result<()> {
     let path = crate::config::Config::path()?;
     let mut cfg = crate::config::Config::load()?;
@@ -363,6 +366,10 @@ pub fn config(
     }
     if let Some(n) = set_backup_keep {
         cfg.backup_keep = Some(*n);
+        changed = true;
+    }
+    if let Some(n) = set_history_days {
+        cfg.history_days = Some(*n);
         changed = true;
     }
     if changed {
@@ -407,6 +414,13 @@ fn print_effective_config(cfg: &crate::config::Config) {
         keep.to_string()
     };
     println!("    backup_keep = {desc}");
+    let hd = cfg.history_days();
+    let hd_desc = if hd == 0 {
+        "0 (keep forever)".to_string()
+    } else {
+        format!("{hd} ({:.0}y)", hd as f64 / 365.0)
+    };
+    println!("    history_days = {hd_desc}");
 }
 
 fn check_default_ssh_key() {

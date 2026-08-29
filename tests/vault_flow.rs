@@ -354,7 +354,7 @@ env_test!(config_set_and_show, {
     let iso = Iso::new();
     commands::install(&iso.key_opt()).unwrap();
     // Set a config value.
-    commands::config(&Some("~/.ssh/custom_key".into()), &None, &None).unwrap();
+    commands::config(&Some("~/.ssh/custom_key".into()), &None, &None, &None).unwrap();
     // Verify it persisted.
     let cfg = dotvault::config::Config::load().unwrap();
     assert_eq!(cfg.key.as_deref(), Some("~/.ssh/custom_key"));
@@ -363,7 +363,7 @@ env_test!(config_set_and_show, {
 env_test!(config_set_backup_keep, {
     let iso = Iso::new();
     commands::install(&iso.key_opt()).unwrap();
-    commands::config(&None, &None, &Some(99)).unwrap();
+    commands::config(&None, &None, &Some(99), &None).unwrap();
     let cfg = dotvault::config::Config::load().unwrap();
     assert_eq!(cfg.backup_keep, Some(99));
 });

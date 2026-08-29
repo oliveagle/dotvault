@@ -9,7 +9,6 @@ use anyhow::{bail, Context, Result};
 
 use crate::access::{self, KEYS_FILE};
 use crate::crypto;
-use crate::envfmt;
 use crate::vault::{project_dir, Vault, LOCK_FILE, VAULT_FILE};
 use crate::vault_lock::{acquire_lock, release_lock};
 
@@ -40,14 +39,13 @@ impl Vault {
             let container = std::fs::read(&vpath)
                 .with_context(|| format!("failed to read {}", vpath.display()))?;
             let plaintext = crypto::decrypt_with_token(token, &container)?;
-            let entries = envfmt::parse(&String::from_utf8_lossy(&plaintext))
-                .context("vault document is corrupted (failed to parse)")?;
+            let doc = crate::vaultdoc::VaultDoc::from_bytes(&plaintext, &crate::util::now_iso())?;
             let keys = access::load_keys(&kpath)?;
             Ok(Vault {
                 dir: dir.to_path_buf(),
                 keys,
                 ssh_key: None,
-                entries,
+                doc,
                 _lock: None,
             })
         })();
