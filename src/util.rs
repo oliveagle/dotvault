@@ -1,7 +1,7 @@
 //! Small self-contained utilities to avoid pulling in extra crates:
 //! a standard Base64 codec and std-only UTC time formatting.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -178,11 +178,27 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 
 // ============================ atomic file output ============================
 
+/// Resolve `dest` through symlinks to the REAL file behind it, so an atomic
+/// temp+rename updates the target instead of replacing the link itself.
+/// (rename() swaps the directory entry — writing "atomically" onto a symlink
+/// path would silently turn the link into a regular file and orphan the
+/// target.) Falls back to `dest` as-is when it doesn't exist yet (first
+/// write) or isn't a link.
+fn resolve_dest(dest: &Path) -> PathBuf {
+    match std::fs::canonicalize(dest) {
+        Ok(real) => real,
+        Err(_) => dest.to_path_buf(),
+    }
+}
+
 /// Write `data` to `dest` atomically via a temp file + rename (no permission
 /// hardening — the result keeps the process umask). Used for the encrypted
-/// `.vault` and `.vault.keys`. For files that contain rendered secrets and need
-/// mode `0600`, use [`write_secret_file`] instead.
+/// `.vault` and `.vault.keys`. If `dest` is a symlink (e.g. the vault's real
+/// files live elsewhere and the project symlinks to them), the write follows
+/// the link to its target — the symlink itself survives. For files that
+/// contain rendered secrets and need mode `0600`, use [`write_secret_file`].
 pub fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
+    let dest = resolve_dest(dest);
     let dir = dest
         .parent()
         .with_context(|| format!("no parent dir for {}", dest.display()))?;
@@ -193,7 +209,8 @@ pub fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
             .unwrap_or("dotvault")
     ));
     std::fs::write(&tmp, data).with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).with_context(|| format!("failed to install {}", dest.display()))?;
+    std::fs::rename(&tmp, &dest)
+        .with_context(|| format!("failed to install {}", dest.display()))?;
     Ok(())
 }
 
@@ -210,8 +227,10 @@ pub fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
 /// This is intentionally separate from [`write_atomic`] (used for the
 /// encrypted `.vault` and `.vault.keys`): that path does not harden
 /// permissions, and widening its behavior would silently change the mode of
-/// an existing vault file.
+/// an existing vault file. Like `write_atomic`, a symlinked `dest` is
+/// resolved to its target so the link survives the atomic replace.
 pub fn write_secret_file(dest: &Path, data: &[u8]) -> Result<()> {
+    let dest = resolve_dest(dest);
     let dir = dest
         .parent()
         .with_context(|| format!("no parent dir for {}", dest.display()))?;
@@ -231,7 +250,8 @@ pub fn write_secret_file(dest: &Path, data: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to chmod {}", tmp.display()))?;
     }
 
-    std::fs::rename(&tmp, dest).with_context(|| format!("failed to install {}", dest.display()))?;
+    std::fs::rename(&tmp, &dest)
+        .with_context(|| format!("failed to install {}", dest.display()))?;
     Ok(())
 }
 
@@ -329,5 +349,55 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "overwritten file must be re-chmodded to 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_follows_symlink_to_target() {
+        // Setup: real file in dir A, symlink in dir B pointing at it (the
+        // "real vault files live centrally, project symlinks to them" layout).
+        let real_dir = tempfile::tempdir().unwrap();
+        let link_dir = tempfile::tempdir().unwrap();
+        let real = real_dir.path().join("the_vault");
+        let link = link_dir.path().join(".vault");
+        std::fs::write(&real, b"v1").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, b"v2").unwrap();
+
+        // The symlink must survive (still a symlink, same target)...
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "atomic write must not replace the symlink with a regular file"
+        );
+        // ...and the REAL file behind it must hold the new content.
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "v2");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "v2");
+        // No temp file litter in either directory.
+        assert!(!real_dir.path().join(".the_vault.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_secret_file_follows_symlink_to_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let real_dir = tempfile::tempdir().unwrap();
+        let link_dir = tempfile::tempdir().unwrap();
+        let real = real_dir.path().join("rendered.yaml");
+        let link = link_dir.path().join("rendered.yaml");
+        std::fs::write(&real, b"old").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_secret_file(&link, b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
