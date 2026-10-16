@@ -287,9 +287,14 @@ action is the backup**.
 The project `.vault` has an **exclusive lock** (an atomically-created
 `.vault.lock` file, gitignored) held for the entire read-modify-write cycle of
 a write command (`init`/`set`/`rm`/`add-key`/`remove-key`). Concurrent
-processes writing the same project **serialize** — no lost updates. If a lock
-can't be acquired within 30s (e.g. a crashed process left it stale), dotvault
-errors with the lock path so you can `rm` it.
+processes writing the same project **serialize** — no lost updates.
+
+The lock records the owning PID + hostname, so a lock left behind by a **dead**
+holder (SIGKILL, crash, or a caller that times out and kills the process) is
+detected and broken automatically on the next attempt instead of blocking every
+later command. A lock whose holder is still alive on this host is never stolen;
+if such a holder stops making progress, acquisition times out after 30s and
+dotvault errors with the lock path so you can `rm` it.
 
 ## File layout
 

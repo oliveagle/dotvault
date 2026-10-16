@@ -68,6 +68,10 @@ impl Iso {
     fn key_opt(&self) -> Option<std::path::PathBuf> {
         Some(self.key.path.clone())
     }
+
+    fn lock_path(&self) -> std::path::PathBuf {
+        self._project.path().join(".vault.lock")
+    }
 }
 
 // =========================================================================
@@ -253,4 +257,34 @@ env_test!(read_modify_write_is_atomic, {
         "lost update: read-modify-write was not atomic, got {} entries",
         v.doc.entries.len()
     );
+});
+
+// =========================================================================
+// 6. STALE LOCK RECOVERY — a `.vault.lock` left behind by a dead holder
+//    (SIGKILL / crash between create and identity-write => 0 bytes) must NOT
+//    block later commands until the 30s timeout. This is the exact failure
+//    that made `dotvault get/list` hang "forever" from ~/.agents.
+// =========================================================================
+env_test!(stale_zero_byte_lock_is_recovered, {
+    let iso = Iso::new();
+    commands::init(&iso.key_opt(), &None).unwrap();
+
+    // Simulate the leaked lock: 0 bytes, backdated well past the grace window.
+    let lock = iso.lock_path();
+    std::fs::write(&lock, b"").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(60);
+    let f = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
+    f.set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    drop(f);
+
+    let started = std::time::Instant::now();
+    let v = vault::Vault::load(&iso.key_path()).unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "stale 0-byte lock was not recovered (took {elapsed:?})"
+    );
+    drop(v);
+    assert!(!lock.exists(), "lock must be released on drop");
 });

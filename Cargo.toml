@@ -21,6 +21,11 @@ serde_json = "1"
 toml = "0.8"
 sha2 = "0.10"
 
+# Unix-only: `kill(pid, 0)` + `gethostname` for stale-lock recovery in
+# src/vault_lock.rs. Already present transitively (pinned in Cargo.lock).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 ssh-key = { version = "0.6", features = ["ed25519", "encryption", "alloc"] }

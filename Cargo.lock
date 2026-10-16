@@ -507,6 +507,7 @@ dependencies = [
  "age",
  "anyhow",
  "clap",
+ "libc",
  "rand",
  "rpassword",
  "serde",
